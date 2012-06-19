@@ -5,10 +5,12 @@ Munin Plugin to read CurrentCost meters, plus Tweeting script.
 
 The project consists of two main files:
 
-* currentcost
+* [currentcost](#munin)
+
   The munin plugin
 
-* EnergyTweeter.py
+* [EnergyTweeter.py](#tweeter)
+
   The tweeting script
 
 Munin
