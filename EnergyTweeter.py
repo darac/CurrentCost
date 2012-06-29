@@ -247,7 +247,7 @@ class EnergyTweeter:
                     # Whole House
                     #Example tweet: "Whole House Energy for DD/MM/YYYY: NN.NNNNkWh (Maximum: NNNNW @ HH:MM, Minimum: NNNNW @ HH:MM) #CurrentCost"
                     (datasum, (datamin,timemin), (datamax, timemax)) = energy[str(channel)]
-                    tweet = "Whole House Energy for %(date)s: %(datasum)6.2fkWh (Maximum: %(datamax)4.0fW @ %(timemax)s, Minimum: %(datamin)4.0fW @ %(timemin)s) #CurrentCost" % {'date'   : time.strftime("%d/%m/%Y", time.gmtime(time.time()-86400)),
+                    tweet = "Whole House Energy for %(date)s: %(datasum)6.2fkWh\n * Maximum: %(datamax)4.0fW @ %(timemax)s\n * Minimum: %(datamin)4.0fW @ %(timemin)s\n#CurrentCost" % {'date'   : time.strftime("%d/%m/%Y", time.gmtime(time.time()-86400)),
                                       'datasum': datasum/1000,    # Convert from Wh to kWh
                                       'datamax': datamax,
                                       'timemax': time.strftime("%H:%M", time.gmtime(timemax)),
@@ -260,7 +260,7 @@ class EnergyTweeter:
                     appliance = int(channel) - 1
                     # Example tweet: "Appliance #1  Energy for DD/MM/YYYY: NN.NNNNkWh (Maximum: NNNNW @ HH:MM, Minimum: NNNNW @ HH:MM) #CurrentCost"
                     (datasum, (datamin,timemin), (datamax, timemax)) = energy[str(channel)]
-                    tweet = "Appliance #%(appl)-2d Energy for %(date)s: %(datasum)6.2fkWh (Maximum: %(datamax)4.0fW @ %(timemax)s, Minimum: %(datamin)4.0fW @ %(timemin)s) #CurrentCost" % {'date'   : time.strftime("%d/%m/%Y", time.gmtime(time.time()-86400)),
+                    tweet = "Appliance #%(appl)-2d Energy for %(date)s: %(datasum)6.2fkWh\n * Maximum: %(datamax)4.0fW @ %(timemax)s\n * Minimum: %(datamin)4.0fW @ %(timemin)s\n#CurrentCost" % {'date'   : time.strftime("%d/%m/%Y", time.gmtime(time.time()-86400)),
                                       'datasum': datasum/1000,    # Convert from Wh to kWh
                                       'datamax': datamax,
                                       'timemax': time.strftime("%H:%M", time.gmtime(timemax)),
