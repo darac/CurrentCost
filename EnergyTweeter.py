@@ -1,3 +1,4 @@
+from __future__ import division
 import oauth2 as oauth
 import httplib
 import ConfigParser
@@ -208,11 +209,13 @@ class EnergyTweeter:
                                                                     time.strftime('%H:%M:%S, %d/%m/%Y', time.gmtime(header[1])),
                                                                     str(header[2]))
                 datasum = 0
+                nancount = 0
                 datamin = (None, None)
                 datamax = (None, None)
                 timestamp = header[0]
                 for datum in data:
                     if datum[0] is None:
+                        nancount += 1
                         continue
                     watts = float(datum[0])
                     watthours = watts/12    # 5 minute steps mean we need to divide by (60/5) to get per hour
@@ -227,7 +230,9 @@ class EnergyTweeter:
                 print "Total: %7.2f watt hours" % datasum
                 print "Min:   %7.2f watts @ %s" % (datamin[0], time.strftime('%H:%M:%S, %d/%m/%Y', time.gmtime(datamin[1])))
                 print "Max:   %7.2f watts @ %s" % (datamax[0], time.strftime('%H:%M:%S, %d/%m/%Y', time.gmtime(datamax[1])))
-                self.Energy[channel] = (datasum, datamin, datamax)
+                if nancount > 0:
+                   print "(      %7.5f%% (%d of %d samples are NaN)" % ((nancount/len(data)) * 100.0, nancount, len(data))
+                self.Energy[channel] = (datasum, datamin, datamax, nancount/len(data))
 
 
 
@@ -246,29 +251,35 @@ class EnergyTweeter:
                 if channel == 1:
                     # Whole House
                     #Example tweet: "Whole House Energy for DD/MM/YYYY: NN.NNNNkWh (Maximum: NNNNW @ HH:MM, Minimum: NNNNW @ HH:MM) #CurrentCost"
-                    (datasum, (datamin,timemin), (datamax, timemax)) = energy[str(channel)]
-                    tweet = "Whole House Energy for %(date)s: %(datasum)6.2fkWh\n * Maximum: %(datamax)4.0fW @ %(timemax)s\n * Minimum: %(datamin)4.0fW @ %(timemin)s\n#CurrentCost" % {'date'   : time.strftime("%d/%m/%Y", time.gmtime(time.time()-86400)),
-                                      'datasum': datasum/1000,    # Convert from Wh to kWh
-                                      'datamax': datamax,
-                                      'timemax': time.strftime("%H:%M", time.gmtime(timemax)),
-                                      'datamin': datamin,
-                                      'timemin': time.strftime("%H:%M", time.gmtime(timemin))}
-                    status = self.client.Tweet(tweet)
-                    print "Posted Status #%s to %s" % (status.id, status.user.screen_name)
+                    (datasum, (datamin,timemin), (datamax, timemax), nanratio) = energy[str(channel)]
+                    if nanratio < 0.2:
+                        tweet = "Whole House Energy for %(date)s: %(datasum)6.2fkWh\n * Maximum: %(datamax)4.0fW @ %(timemax)s\n * Minimum: %(datamin)4.0fW @ %(timemin)s\n#CurrentCost" % {'date'   : time.strftime("%d/%m/%Y", time.gmtime(time.time()-86400)),
+                                          'datasum': datasum/1000,    # Convert from Wh to kWh
+                                          'datamax': datamax,
+                                          'timemax': time.strftime("%H:%M", time.gmtime(timemax)),
+                                          'datamin': datamin,
+                                          'timemin': time.strftime("%H:%M", time.gmtime(timemin))}
+                        status = self.client.Tweet(tweet)
+                        print "Posted Status #%s to %s" % (status.id, status.user.screen_name)
+                    else:
+                        print "Not posting status, NaN ratio is %7.5f%%" % (nanratio*100)
                 else:
                     # Appliance
                     appliance = int(channel) - 1
                     # Example tweet: "Appliance #1  Energy for DD/MM/YYYY: NN.NNNNkWh (Maximum: NNNNW @ HH:MM, Minimum: NNNNW @ HH:MM) #CurrentCost"
-                    (datasum, (datamin,timemin), (datamax, timemax)) = energy[str(channel)]
-                    tweet = "Appliance #%(appl)-2d Energy for %(date)s: %(datasum)6.2fkWh\n * Maximum: %(datamax)4.0fW @ %(timemax)s\n * Minimum: %(datamin)4.0fW @ %(timemin)s\n#CurrentCost" % {'date'   : time.strftime("%d/%m/%Y", time.gmtime(time.time()-86400)),
-                                      'datasum': datasum/1000,    # Convert from Wh to kWh
-                                      'datamax': datamax,
-                                      'timemax': time.strftime("%H:%M", time.gmtime(timemax)),
-                                      'datamin': datamin,
-                                      'timemin': time.strftime("%H:%M", time.gmtime(timemin)),
-                                      'appl'   : appliance}
-                    status = self.client.Tweet(tweet)
-                    print "Posted Status #%s to %s" % (status.id, status.user.screen_name)
+                    (datasum, (datamin,timemin), (datamax, timemax), nanratio) = energy[str(channel)]
+                    if nanratio < 0.2:
+                        tweet = "Appliance #%(appl)-2d Energy for %(date)s: %(datasum)6.2fkWh\n * Maximum: %(datamax)4.0fW @ %(timemax)s\n * Minimum: %(datamin)4.0fW @ %(timemin)s\n#CurrentCost" % {'date'   : time.strftime("%d/%m/%Y", time.gmtime(time.time()-86400)),
+                                          'datasum': datasum/1000,    # Convert from Wh to kWh
+                                          'datamax': datamax,
+                                          'timemax': time.strftime("%H:%M", time.gmtime(timemax)),
+                                          'datamin': datamin,
+                                          'timemin': time.strftime("%H:%M", time.gmtime(timemin)),
+                                          'appl'   : appliance}
+                        status = self.client.Tweet(tweet)
+                        print "Posted Status #%s to %s" % (status.id, status.user.screen_name)
+                    else:
+                        print "Not posting status, NaN ratio is %7.5f%%" % (nanratio*100)
 
 
 
@@ -303,4 +314,6 @@ if __name__ == '__main__':
     elif args.mode == 'cron':
         ET.GetEnergy(host, cron=True)
         ET.TweetEnergy(cron=True)
+    else:
+        print "MODE should be one of: setup, getenergy, tweetenergy, cron"
 
