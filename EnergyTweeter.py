@@ -188,10 +188,13 @@ class EnergyTweeter:
         import rrdtool
         import re
         import time
+        import calendar
 
         RRDDIR = '/var/lib/munin'
         domain = host.split('.',1)[1]
         self.Energy = dict()
+
+        tzoffset = calendar.timegm(time.localtime()) - calendar.timegm(time.gmtime())
         if not cron:
             print "Searching dir %s" % os.path.join(RRDDIR,domain)
         for filename in os.listdir(os.path.join(RRDDIR,domain)):
@@ -205,14 +208,14 @@ class EnergyTweeter:
                         "-s", "00:00 yesterday",
                         "-e", "23:59 yesterday")
                 if not cron:
-                    print "Data from %s to %s (%s second steps)" % (time.strftime('%H:%M:%S, %d/%m/%Y', time.gmtime(header[0])),
-                                                                    time.strftime('%H:%M:%S, %d/%m/%Y', time.gmtime(header[1])),
+                    print "Data from %s to %s (%s second steps)" % (time.strftime('%H:%M:%S, %d/%m/%Y', time.gmtime(header[0] + tzoffset)),
+                                                                    time.strftime('%H:%M:%S, %d/%m/%Y', time.gmtime(header[1] + tzoffset)),
                                                                     str(header[2]))
                 datasum = 0
-                nancount = 0
                 datamin = (None, None)
                 datamax = (None, None)
-                timestamp = header[0]
+                nancount = 0
+                timestamp = header[0] + tzoffset
                 for datum in data:
                     if datum[0] is None:
                         nancount += 1
