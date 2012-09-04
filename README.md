@@ -115,14 +115,19 @@ Tweeter
 
 This script reads the RRDs provided by Munin (so you need to be running the munin script above) and summarises the output into daily tweets of the form:
 
-    Whole House Energy for 18/06/2012: 12.81kWh (Maximum: 2596W @ 17:45, Minimum: 429W @ 11:20) #CurrentCost
+    Whole House Energy for 18/06/2012: 12.81kWh
+     * Maximum: 2596W @ 17:45
+     * Minimum: 429W @ 11:20
+    #CurrentCost
 
 Configuration
 -------------
 
 You should start by calling:
 
-    python EnergyTweeter.py --mode=setup --host=foobar.example.org
+```shell
+python EnergyTweeter.py --mode=setup --host=foobar.example.org
+```
 
 where `foobar.example.org` is the munin host to which the CurrentCost is attached. *Note*: you want to run `EnergyTweeter.py` on the Munin Master host, but that, of course, doesn't have to be the host running the munin plugin.
 
@@ -130,14 +135,20 @@ You should be walked through authorising the plugin with twitter.
 
 Next, run:
 
-    python EnergyTweeter.py --mode=getenergy
+```shell
+python EnergyTweeter.py --mode=getenergy
+```
 
 to see the data being read. You can run:
 
-    python EnergyTweeter.py --mode=tweetenergy
+```shell
+python EnergyTweeter.py --mode=tweetenergy
+```
 
 to put out your first tweet, but you will most likely find it useful to add
 
-    python EnergyTweeter.py --mode=cron
+```shell
+python EnergyTweeter.py --mode=cron
+```
 
 to a cron job.
