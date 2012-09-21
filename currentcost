@@ -159,6 +159,12 @@ if ( !eval "require Time::Local;" ) {
     $ret .= "Could not load Time::Local; ";
 }
 
+my $HaveProcDaemon = 1;
+if ( !eval "require Proc::Daemon;" ) {
+	$HaveProcDaemon = 0;
+	# This isn't fatal, though.
+}
+
 if ( defined $ARGV[0] and $ARGV[0] eq 'autoconf' ) {
 
     # Shouldn't autoconfigure as there's no reliable way to detect
