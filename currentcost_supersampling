@@ -27,11 +27,14 @@ Device::SerialPort
 
 =item *
 
-YAML
+JSON
 
 =item *
 
 Time::Local
+
+=item *
+Daemon::Daemonize
 
 =back
 
@@ -58,7 +61,7 @@ The configuration can be broken down into the following subsections:
 
 =item env.device
 
-Specfies the device node where the CurrentCost monitor can be found. You may find it useful to use a udev rule to symlink this somewhere permanent.
+Specfies the device node where the CurrentCost monitor can be found. You may find it useful to use a udev rule to symlink this somewhere permanent (for example: C<SUBSYSTEM=="tty", SUBSYSTEMS=="usb", ATTRS{manufacturer}=="Prolific Technology Inc.", ATTRS{product}=="USB-Serial Controller", SYMLINK+="currentcost%n"> will allow you to specify /dev/currentcost0 here).
 
 =item env.baud
 
@@ -66,7 +69,7 @@ Specifies the baud rate to use. CurrentCost devices may speak at 2400, 9600 or 5
 
 =item env.tick
 
-How long, in seconds, to consider data valid for. CurrentCost monitors typically put out data every 6 or 10 seconds. If Munin does a data run less than C<env.tick> seconds after a config run, there's no need to wait for more data.
+How long, in seconds, to consider data valid for. CurrentCost monitors typically put out data every 6 or 10 seconds. This will influence the generation of your RRD (which is only done I<once>).
 
 =back
 
@@ -118,12 +121,14 @@ The model of the meter. Currently "CC02" and "CC128" are supported.
 Paul Saunders L<darac@darac.org.uk>
 
 =cut
+#vim: set autoindent expandtab tabstop=4 shiftwidth=4
 
 use strict;
 use warnings;
 use utf8;
 use Munin::Plugin;
 use Data::Dump qw{pp};
+use Fcntl qw(:flock SEEK_END);
 
 need_multigraph();
 
@@ -141,7 +146,7 @@ my $rate2     = $ENV{rate2}     || "8.2";     # in pence/cents
 my $nightrate = $ENV{nightrate} || "0";       # 0 = disabled
 my $nighthours = $ENV{nighthours} || "23:30-06:30";
 my $standingcharge = $ENV{standingcharge} || "0.0";     # pence/cents per month
-my $metertype      = $ENV{metertype}      || "CC128";
+#my $metertype      = $ENV{metertype}      || "CC128";	# Should be able to auto-detect this based on msg/src
 
 my $MUNIN_DEBUG = $ENV{MUNIN_DEBUG} || 0;
 
@@ -152,50 +157,115 @@ if ( !eval "require XML::Simple;" ) {
 if ( !eval "require Device::SerialPort;" ) {
     $ret .= "Could not load Device::SerialPort; ";
 }
-if ( !eval "require YAML;" ) {
-    $ret .= "Could not load YAML; ";
+if ( !eval "require JSON;" ) {
+    $ret .= "Could not load JSON; ";
 }
 if ( !eval "require Time::Local;" ) {
     $ret .= "Could not load Time::Local; ";
 }
 
-my $HaveProcDaemon = 1;
-if ( !eval "require Proc::Daemon;" ) {
-	$HaveProcDaemon = 0;
-	# This isn't fatal, though.
+if ( !eval "require Daemon::Daemonize;" ) {
+	$ret .= "Could not load Daemon::Daemonize;";
 }
 
 if ( defined $ARGV[0] and $ARGV[0] eq 'autoconf' ) {
 
     # Shouldn't autoconfigure as there's no reliable way to detect
     # serial devices.
-    print "no\n";
+    print "no";
+	if ($ret){
+		print " ($ret)\n";
+	} else	{
+		print " (can't auto-detect serial devices)\n";
+	};
     exit 0;
 }
 
+## Configuration. You shouldn't need to change these
 my @lastread;
+my $daemon_pid
 
-sub save_data {
-    my @savedata = @_;
 
-    # Do we need to save this data?
-    if ( !@lastread
-        or time >= Time::Local::timelocal(@lastread) + ($tick_rate) )
-    {
-        print "# Saving Data (Data is "
-          . ( time - Time::Local::timelocal(@lastread) )
-          . " seconds old)\n"
-          if $MUNIN_DEBUG;
-        @lastread = localtime(time);
+###### DAEMON ######
+sub run_daemon {
+    # Start by opening the serial port
+    my $tty = Device::SerialPort->new ($device_node) || die "Can't open $device_node: $!";
+    $tty->baudrate($baud_rate)  || die "Can't set serial baud rate";
+    $tty->parity("none")        || die "Can't set serial parity";
+    $tty->databits(8)           || die "Can't set serial databits";
+    $tty->handshake("none")     || die "Can't set serial handshake";
+    $tty->write_settings        || die "Can't set serial parameters";
 
-        my @save_vector;
-        push @save_vector, YAML::Dump(@lastread);
-        foreach ( split /\n/, YAML::Dump(@savedata) ) {
-            push @save_vector, $_;
+    open (my $ttydev, '<', $device_node) || die "Can't open $device_node: $?";
+
+    # We should be ready to talk to the CC now
+    while (<$ttydev>){
+        print "# Read from device: $_\n" if $MUNIN_DEBUG;
+        if (m{(<msg>.*</msg>)}){
+            my $XMLRef = XML::Simple::XMLin ( $1, KeepRoot => 1);
+
+            my $CC_Personality = $xmlref->{msg}->{src};
+
+            my $sensor;
+            my $temperature;
+            my @data;   # List of channel/units/value
+
+            my $timestamp = time();
+            # Note that we COULD take a timestamp from the CC,
+            # but as it only supplies HH:MM:SS, determining if
+            # the timestamp is from a different day (i.e. around midnigh)
+            # or if the clock is just wrong is difficult.
+            #
+            #  Patches welcome
+            #
+
+            if ($CC_Personality =~ /CC128/){
+                $sensor = $xmlref->{msg}->{sensor};
+            } elsif ($CC_Personality->{name} =~ /CC02/ ){
+                $sensor = 0;
+            }
+            print "# Data for Sensor $sensor follows:\n" if $MUNIN_DEBUG;
+
+            $temperature = $xmlref->{msg}->{tmpr};
+                
+            foreach my $key ( keys %{ $xmlref->{msg} } ) {
+                if ( $key =~ /^ch(\d+)$/ ) {
+                    my $channel = $1;
+                    my $unit = ( keys %{ $xmlref->{msg}->{"ch$channel"} } )[0];
+                    my $val  = $xmlref->{msg}->{"ch$channel"}->{$unit};
+                    print "#   Channel $channel, Unit $unit, Value $val\n"
+                      if $MUNIN_DEBUG;
+                    push @data,
+                      {
+                        "channel" => $channel,
+                        "unit"    => $unit,
+                        "value"   => $val
+                      };
+                }
+            }
+
+            # Data read and parsed. Time to save it to the spoolfile
+            open (my $spoolfile, '>>', "$Munin::Plugin::pluginstatedir/munin.currentcost.spool") || die "Can't open spoolfile ($Munin::Plugin::pluginstatedir/munin.currentcost.spool): $!";
+
+            # Lock the spoolfile
+            flock ($spoolfile, LOCK_EX) or die "Can't lock spoolfile: $!";
+            seek ($fh, 0, SEEK_END) or die "Can't seek in spoolfile: $!";
+            # Spoolfile locked (and ready to append at end)
+
+            
+            print $spoolfile encode_json(
+                {'timestamp' => $timestamp,
+                 'channel' => $channel,
+                 'temperature' => $temperature,
+                 'data' => @data}) . "\n";
+
+            flock($spoolfile, LOCK_UN) or die "Can't unlock spoolfile: $!";
         }
-        save_state(@save_vector);
     }
 }
+
+###### PLUGIN ######
+
 
 sub load_data {
 
@@ -552,7 +622,7 @@ sub collect_cc02_data {
     return @cc_data_arr;
 }
 
-my @cc_data = load_data();
+#my @cc_data = load_data();
 
 if ( defined $ARGV[0] and $ARGV[0] eq 'config' ) {
     if ($ret) {
