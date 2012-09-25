@@ -127,7 +127,6 @@ use strict;
 use warnings;
 use utf8;
 use Munin::Plugin;
-use Data::Dump qw{pp};
 use Fcntl qw(:flock SEEK_END);
 
 need_multigraph();
