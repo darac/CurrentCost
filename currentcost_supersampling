@@ -127,7 +127,7 @@ use strict;
 use warnings;
 use utf8;
 use Munin::Plugin;
-use Fcntl qw(:flock SEEK_END);
+use Fcntl qw(:flock SEEK_END SEEK_SET);
 
 need_multigraph();
 
@@ -146,6 +146,7 @@ my $nightrate = $ENV{nightrate} || "0";       # 0 = disabled
 my $nighthours = $ENV{nighthours} || "23:30-06:30";
 my $standingcharge = $ENV{standingcharge} || "0.0";     # pence/cents per month
 #my $metertype      = $ENV{metertype}      || "CC128";	# Should be able to auto-detect this based on msg/src
+# TODO: What about Gas?
 
 my $MUNIN_DEBUG = $ENV{MUNIN_DEBUG} || 0;
 
@@ -182,11 +183,16 @@ if ( defined $ARGV[0] and $ARGV[0] eq 'autoconf' ) {
 
 ## Configuration. You shouldn't need to change these
 my @lastread;
-my $daemon_pid
+my $daemon_pidfile =  "$Munin::Plugin::pluginstatedir/munin.currentcost.pidfile";
+my $value_spoolfile = "$Munin::Plugin::pluginstatedir/munin.currentcost.value-spool";
+my $config_spoolfile = "$Munin::Plugin::pluginstatedir/munin.currentcost.config-spool";
 
 
 ###### DAEMON ######
 sub run_daemon {
+
+	Daemon::Daemonize->write_pidfile($daemon_pidfile);
+
     # Start by opening the serial port
     my $tty = Device::SerialPort->new ($device_node) || die "Can't open $device_node: $!";
     $tty->baudrate($baud_rate)  || die "Can't set serial baud rate";
@@ -194,14 +200,15 @@ sub run_daemon {
     $tty->databits(8)           || die "Can't set serial databits";
     $tty->handshake("none")     || die "Can't set serial handshake";
     $tty->write_settings        || die "Can't set serial parameters";
+	$tty->are_match("</msg>");	# Look for end of XML
 
-    open (my $ttydev, '<', $device_node) || die "Can't open $device_node: $?";
+	my $daemonstarttime = time();
 
     # We should be ready to talk to the CC now
-    while (<$ttydev>){
+    while ($tty->lookfor){
         print "# Read from device: $_\n" if $MUNIN_DEBUG;
         if (m{(<msg>.*</msg>)}){
-            my $XMLRef = XML::Simple::XMLin ( $1, KeepRoot => 1);
+            my $xmlref = XML::Simple::XMLin ( $1, KeepRoot => 1);
 
             my $CC_Personality = $xmlref->{msg}->{src};
 
@@ -244,116 +251,54 @@ sub run_daemon {
             }
 
             # Data read and parsed. Time to save it to the spoolfile
-            open (my $spoolfile, '>>', "$Munin::Plugin::pluginstatedir/munin.currentcost.spool") || die "Can't open spoolfile ($Munin::Plugin::pluginstatedir/munin.currentcost.spool): $!";
+            open (my $spoolfile, '>>', "$value_spoolfile") || die "Can't open spoolfile ($value_spoolfile): $!";
 
-            # Lock the spoolfile
+            # Lock the value spoolfile
             flock ($spoolfile, LOCK_EX) or die "Can't lock spoolfile: $!";
-            seek ($fh, 0, SEEK_END) or die "Can't seek in spoolfile: $!";
+            seek ($spoolfile, 0, SEEK_END) or die "Can't seek in spoolfile: $!";
             # Spoolfile locked (and ready to append at end)
 
-            
             print $spoolfile encode_json(
                 {'timestamp' => $timestamp,
-                 'channel' => $channel,
+                 'sensor' => $sensor,
                  'temperature' => $temperature,
                  'data' => @data}) . "\n";
 
             flock($spoolfile, LOCK_UN) or die "Can't unlock spoolfile: $!";
+
+			close ($spoolfile);
+
+			# Also save list of sensors/channels/units to config spool
+			open ($spoolfile, '+<', "$config_spoolfile") || die "Can't open spoolfile ($config_spoolfile): $!";
+
+			flock ($spoolfile, LOCK_EX) or die "Can't lock spoolfile: $!";
+			seek ($spoolfile, 0, SEEK_SET) or die "Can't seek in spoolfile: $!";
+
+			my $tempconfig = decode_json (do { local $/ = <$spoolfile> });
+
+			for my $datum (@data){
+				$tempconfig->{$sensor}->{$datum->{'channel'}} = $datum->{'unit'};
+			}
+			truncate($spoolfile,0);
+			seek ($spoolfile, 0, SEEK_SET) or die "Can't seek in spoolfile: $!";
+			print $spoolfile encode_json $tempconfig;
+
+            flock($spoolfile, LOCK_UN) or die "Can't unlock spoolfile: $!";
+
+			close ($spoolfile);
+
         }
+
+		sleep 1;
+		if (time() >= $daemonstarttime + 30 and $MUNIN_DEBUG) {
+			print STDERR "# 30 seconds have elapsed, stopping daemon";
+			return;
+		}
+		# Otherwise, just keep going.
     }
 }
 
 ###### PLUGIN ######
-
-
-sub load_data {
-
-    # Bring the data back in
-    my @save_vector = restore_state();
-
-    # Read the timestamp, Do we need to refresh the data?
-    my @lastread = YAML::Load( shift @save_vector );
-
-    my $yamlstr = '';
-    foreach (@save_vector) {
-        $yamlstr .= "$_\n";
-    }
-    my @dataarray = YAML::Load($yamlstr);
-
-    if ( !@lastread
-        or time >= ( Time::Local::timelocal(@lastread) + ($tick_rate) ) )
-    {
-
-        # Data is stale
-        print "# Data is stale ("
-          . ( time - Time::Local::timelocal(@lastread) )
-          . " seconds). Re-reading device\n"
-          if $MUNIN_DEBUG;
-
-        eval {
-
-            # Fetch the XML
-            my @temparray;
-            if ( $metertype eq "CC128" ) {
-                @temparray = collect_cc128_data( $device_node, $baud_rate );
-            }
-            elsif ( $metertype eq "CC02" ) {
-                @temparray = collect_cc02_data( $device_node, $baud_rate );
-            }
-            else {
-                die "Unknown meter type $metertype";
-            }
-
-       # Read the time so we know whether to reset daily/monthly/yearly counters
-            my @now = localtime(time);
-            my %is_new;
-            $is_new{daily}   = ( $now[3] != $lastread[3] ) ? 1 : 0;
-            $is_new{monthly} = ( $now[4] != $lastread[4] ) ? 1 : 0;
-            $is_new{yearly}  = ( $now[5] != $lastread[5] ) ? 1 : 0;
-
-            for ( my $i = 0 ; $i <= $#temparray ; $i++ ) {
-                my $datum = $temparray[$i];
-                for ( my $j = 0 ; $j <= $#{ $datum->{data} } ; $j++ ) {
-                    for my $period (qw(daily monthly yearly)) {
-                        $period = "n$period" if is_night_rate();
-                        if ( defined( $dataarray[$i]->{data}[$j]->{$period} ) )
-                        {
-
-                            # There's old data. Consider incrementing it
-                            if ( $is_new{$period} ) {
-
-                                # Start of a new period, reset the counter
-                                print
-"# Start of a new $period period. Resetting counter\n"
-                                  if $MUNIN_DEBUG;
-                                $temparray[$i]->{data}[$j]->{$period} = 0;
-                            }
-                            else {
-                                $temparray[$i]->{data}[$j]->{$period} =
-                                  $dataarray[$i]->{data}[$j]->{$period} +
-                                  $temparray[$i]->{data}[$j]->{value} / 12;
-                            }
-                        }
-                        else {
-
-                            # No old data. Set it.
-                            $temparray[$i]->{data}[$j]->{$period} =
-                              $temparray[$i]->{data}[$j]->{value} / 12;
-                        }
-                    }
-                }
-            }
-
-            # If the above threw an error, we won't overwrite the old data
-            @dataarray = @temparray;
-
-            1;
-        } or do {
-            print $@;
-          }
-    }
-    return @dataarray;
-}
 
 sub is_night_rate {
 
@@ -507,120 +452,6 @@ For full definition, see L<http://www.currentcost.com/xx128/xml.html>
  
 =cut
 
-sub collect_cc128_data {
-
-    # Read data from the serial port until we see a repeated sensor
-    my ( $port, $baud ) = @_;
-
-    my $tty = Device::SerialPort->new($port) || die "Can't open $port: $!";
-    $tty->baudrate($baud)   || die "Can't set serial baudrate";
-    $tty->parity("none")    || die "Can't set serial parity";
-    $tty->databits(8)       || die "Can't set serial databits";
-    $tty->handshake("none") || die "Can't set serial handshake";
-    $tty->write_settings    || die "Can't set serial parameters";
-
-    open( my $ttydev, "<", $port ) || die "Can't open $port: $?";
-
-    my @cc_data_arr;
-    my %seen_sensors;
-
-    while (<$ttydev>) {
-        print "# Read from device: $_\n" if $MUNIN_DEBUG;
-        if (m{(<msg>.*</msg>)}) {
-            my $xmlref = XML::Simple::XMLin( $1, KeepRoot => 1 );
-
-            my $sensor = $xmlref->{msg}->{sensor};
-            print "# Parsing Sensor $sensor\n" if $MUNIN_DEBUG;
-            next unless defined $sensor;
-            if ( defined $seen_sensors{$sensor} ) {
-
-                # We've seen this sensor before.
-                # Time to stop reading data
-                print "# Hello again, Sensor $sensor\n" if $MUNIN_DEBUG;
-                last;
-            }
-            $seen_sensors{$sensor} = 1;
-
-            my $temphash;
-            $temphash->{sensor} = $sensor;
-            $temphash->{temp}   = $xmlref->{msg}->{tmpr};
-            my @temparr;
-            foreach my $key ( keys %{ $xmlref->{msg} } ) {
-                if ( $key =~ /ch(\d+)/ ) {
-                    my $channel = $1;
-                    my $unit = ( keys %{ $xmlref->{msg}->{"ch$channel"} } )[0];
-                    my $val  = $xmlref->{msg}->{"ch$channel"}->{$unit};
-                    print "# Channel $channel, Unit $unit, Value $val\n"
-                      if $MUNIN_DEBUG;
-                    push @temparr,
-                      {
-                        "channel" => $channel,
-                        "unit"    => $unit,
-                        "value"   => $val
-                      };
-                }
-            }
-            $temphash->{data} = \@temparr;
-
-            push @cc_data_arr, $temphash;
-        }
-    }
-    close($ttydev);
-
-    return @cc_data_arr;
-}
-
-sub collect_cc02_data {
-
-	# Thanks to David Edmondson <dme@dme.org> for this function
-
-    # Read data from the serial port
-    my ( $port, $baud ) = @_;
-
-    my $tty = Device::SerialPort->new($port) || die "Can't open $port: $!";
-    $tty->baudrate($baud)   || die "Can't set serial baudrate";
-    $tty->parity("none")    || die "Can't set serial parity";
-    $tty->databits(8)       || die "Can't set serial databits";
-    $tty->handshake("none") || die "Can't set serial handshake";
-    $tty->write_settings    || die "Can't set serial parameters";
-
-    open( my $ttydev, "<", $port ) || die "Can't open $port: $?";
-
-    my @cc_data_arr;
-
-    while (<$ttydev>) {
-        if (m{(<msg>.*</msg>)}) {
-            my $xmlref = XML::Simple::XMLin( $1, KeepRoot => 1 );
-
-            my $temphash;
-            $temphash->{sensor} = 0;                        # Only one sensor.
-            $temphash->{temp}   = $xmlref->{msg}->{tmpr};
-            my @temparr;
-            foreach my $key ( keys %{ $xmlref->{msg} } ) {
-                if ( $key =~ /ch(\d+)/ ) {
-                    my $channel = $1;
-                    my $unit = ( keys %{ $xmlref->{msg}->{"ch$channel"} } )[0];
-                    my $val  = $xmlref->{msg}->{"ch$channel"}->{$unit};
-                    push @temparr,
-                      {
-                        "channel" => $channel,
-                        "unit"    => $unit,
-                        "value"   => $val
-                      };
-                }
-            }
-            $temphash->{data} = \@temparr;
-
-            push @cc_data_arr, $temphash;
-
-            last;
-        }
-    }
-    close($ttydev);
-
-    return @cc_data_arr;
-}
-
 #my @cc_data = load_data();
 
 if ( defined $ARGV[0] and $ARGV[0] eq 'config' ) {
@@ -629,47 +460,57 @@ if ( defined $ARGV[0] and $ARGV[0] eq 'config' ) {
         exit 1;
     }
 
-    for my $datum (@cc_data) {
-        my $unit = '';
-        foreach my $key ( @{ $datum->{data} } ) {
-            if ( $unit eq '' ) {
-                $unit = $key->{unit};
-            }
-            elsif ( $unit != $key->{unit} ) {
-                print STDERR "# Conflicting units ($unit and $key->{unit})"
-			   	. " on sensor $datum->{sensor}";
-            }
-        }
+	# Start the daemon
+	if ($MUNIN_DEBUG) {
+		print STDERR "# Will run collection daemon locally for 30 seconds...\n";
+		run_daemon();
+	} else {
+		if (Daemon::Daemonize->check_pidfile($daemon_pidfile) == 0){
+			Daemon::Daemonize->daemonize(run => &run_daemon);
+		}
+	}
 
-        if ( $datum->{sensor} == 0 ) {
+	# Open the config spoolfile. That'll tell us what sensors/channels are available
+	open (my $spoolfile, '<', $config_spoolfile) || die "Can't open spoolfile ($config_spoolfile): $!";
+	flock ($spoolfile, LOCK_EX) or die "Can't lock spoolfile: $!";
+	seek ($spoolfile, 0, SEEK_SET) or die "Can't seek in spoolfile: $!";
+
+	my $confighash = decode_json (do { local $/ = <$spoolfile> });
+	flock ($spoolfile, LOCK_UN) or die "Can't unlock spoolfile: $!";
+	close ($spoolfile);
+
+	for my $sensor (keys %$confighash){
+		my $sensordata = $confighash->{$sensor};
+
+        if ( $sensor == 0 ) {
 
             # Output the Root graph (being sensor 0)
             print <<EOF;
 multigraph currentcost
 graph_title CurrentCost Consumption
 graph_args --base 1000 -l 0
-graph_vlabel $unit
+graph_vlabel $sensordata->{$sensor->{0}}
 graph_category currentcost
 graph_info This graph shows the 'whole house' data.
+graph_total Total
+update_rate $tick_rate
+graph_data_size custom 1d, 10s for 1w, 1m for 1t, 5m for 1y
 EOF
-            if ( scalar( @{ $datum->{data} } ) > 1 ) {
-                print "graph_total Total\n";
-            }
-            foreach my $channel ( @{ $datum->{data} } ) {
-                my $fieldname = "ch" . $channel->{channel};
+            foreach my $channel ( keys %$sensordata ){
+                my $fieldname = "ch" . $channel;
                 print <<EOF;
-$fieldname.label Channel $channel->{channel}
+$fieldname.label Channel $channel
 $fieldname.type GAUGE
 $fieldname.min 0
 $fieldname.draw AREA
-${fieldname}_t.label Channel $channel->{channel} Trend
+${fieldname}_t.label Channel $channel Trend
 ${fieldname}_t.type GAUGE
 ${fieldname}_t.min 0
 ${fieldname}_t.draw LINE2
 EOF
                 if ($nightrate) {
                     print <<EOF;
-${fieldname}_n.label Channel $channel->{channel} Night
+${fieldname}_n.label Channel $channel Night
 ${fieldname}_n.type GAUGE
 ${fieldname}_n.min 0
 ${fieldname}_t.cdef ${fieldname}_n,UN,${fieldname},${fieldname},IF,3600,TRENDNAN
@@ -685,21 +526,21 @@ EOF
 multigraph currentcost_cumulative
 graph_title CurrentCost Total Usage
 graph_args --base 1000 -l 0
-graph_vlabel $unit * hours
+graph_vlabel $sensordata->{$sensor->{0}} * hours
 graph_category currentcost
 EOF
             print "graph_order ";
             my $confstr = '';
-            foreach my $channel ( @{ $datum->{data} } ) {
-                my $fieldname = "ch" . $channel->{channel};
+            foreach my $channel ( sort keys %$sensordata ) {
+                my $fieldname = "ch" . $channel;
                 print "${fieldname}=currentcost.$fieldname ${fieldname}_d ";
                 $confstr .= <<EOF;
 ${fieldname}.update no
-${fieldname}.label Channel $channel->{channel}
+${fieldname}.label Channel $channel
 ${fieldname}.type GAUGE
 ${fieldname}.min 0
 ${fieldname}.cdef PREV,${fieldname},12,/,ADDNAN
-${fieldname}_d.label Channel $channel->{channel} Daily
+${fieldname}_d.label Channel $channel Daily
 ${fieldname}_d.type GAUGE
 ${fieldname}_d.min 0
 EOF
@@ -719,14 +560,12 @@ graph_title CurrentCost Estimated Cost
 graph_args --base 1000 -l 0
 graph_vlabel ${currency}
 graph_category currentcost
+graph_total Total
 EOF
-            if ( scalar( @{ $datum->{data} } ) > 1 ) {
-                print "graph_total Total\n";
-            }
-            foreach my $channel ( @{ $datum->{data} } ) {
-                my $fieldname = "ch" . $channel->{channel};
+            foreach my $channel ( keys %$sensordata ) {
+                my $fieldname = "ch" . $channel;
                 print <<EOF;
-$fieldname.label Channel $channel->{channel}
+$fieldname.label Channel $channel
 $fieldname.type GAUGE
 $fieldname.min 0
 EOF
@@ -736,28 +575,25 @@ EOF
         else {
 
             # Output a subordinate graph (being an appliance)
-            my $sensor = $datum->{sensor};
             print <<EOF;
 multigraph currentcost.appliance$sensor
 graph_title CurrentCost Consumption (Appliance $sensor)
 graph_args --base 1000 -l 0
-graph_vlabel $unit
+graph_vlabel $sensordata->{$sensor->{0}}
 graph_category currentcost
 graph_info This graph shows the data for Appliance $sensor
+graph_total Total
 EOF
-            if ( scalar( @{ $datum->{data} } ) > 1 ) {
-                print "graph_total Total\n";
-            }
-            foreach my $channel ( @{ $datum->{data} } ) {
-                my $fieldname = "ch" . $channel->{channel};
+            foreach my $channel ( keys %$sensordata ) {
+                my $fieldname = "ch" . $channel;
                 print <<EOF;
-$fieldname.label Channel $channel->{channel}
+$fieldname.label Channel $channel
 $fieldname.type GAUGE
 $fieldname.min 0
 EOF
                 if ($nightrate) {
                     print <<EOF;
-${fieldname}_n.label Channel $channel->{channel} Night
+${fieldname}_n.label Channel $channel Night
 ${fieldname}_n.type GAUGE
 ${fieldname}_n.min 0
 EOF
@@ -769,16 +605,16 @@ EOF
 multigraph currentcost_cumulative.appliance$sensor
 graph_title CurrentCost Total Usage (Appliance $sensor)
 graph_args --base 1000 -l 0
-graph_vlabel $unit * hours
+graph_vlabel $sensordata->{$sensor->{0}} * hours
 graph_category currentcost
 EOF
             print "graph_order ";
             my $confstr = '';
-            foreach my $channel ( @{ $datum->{data} } ) {
-                my $fieldname = "ch" . $channel->{channel};
+            foreach my $channel ( sort keys %$sensordata ) {
+                my $fieldname = "ch" . $channel;
                 print "$fieldname=currentcost.$fieldname ";
                 $confstr .= <<EOF;
-$fieldname.label Channel $channel->{channel}
+$fieldname.label Channel $channel
 $fieldname.type GAUGE
 $fieldname.min 0
 $fieldname.cdef PREV,$fieldname,12,/,ADDNAN
@@ -793,25 +629,23 @@ graph CurrentCost Estimated Cost (Appliance $sensor)
 graph_args --base 1000 -l 0
 graph_vlabel ${currency}
 graph_category currentcost
+graph_total Total
 EOF
-            if ( scalar( @{ $datum->{data} } ) > 1 ) {
-                print "graph_total Total\n";
-            }
-            foreach my $channel ( @{ $datum->{data} } ) {
-                my $fieldname = "ch" . $channel->{channel};
+            foreach my $channel ( keys %$sensordata ) {
+                my $fieldname = "ch" . $channel;
                 print <<EOF;
-$fieldname.label Channel $channel->{channel}
+$fieldname.label Channel $channel
 $fieldname.type GAUGE
 $fieldname.min 0
 EOF
             }
         }
     }
-    save_data(@cc_data);
     exit 0;
 }
 
 # Output the value data
+=cut
 for my $datum (@cc_data) {
     if ( $datum->{sensor} == 0 ) {
 
