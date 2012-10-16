@@ -145,7 +145,7 @@ my $rate2     = $ENV{rate2}     || "8.2";     # in pence/cents
 my $nightrate = $ENV{nightrate} || "0";       # 0 = disabled
 my $nighthours = $ENV{nighthours} || "23:30-06:30";
 my $standingcharge = $ENV{standingcharge} || "0.0";     # pence/cents per month
-#my $metertype      = $ENV{metertype}      || "CC128";	# Should be able to auto-detect this based on msg/src
+#my $metertype      = $ENV{metertype}      || "CC128";  # Should be able to auto-detect this based on msg/src
 # TODO: What about Gas?
 
 my $MUNIN_DEBUG = $ENV{MUNIN_DEBUG} || 0;
@@ -165,7 +165,7 @@ if ( !eval "require Time::Local;" ) {
 }
 
 if ( !eval "require Daemon::Daemonize;" ) {
-	$ret .= "Could not load Daemon::Daemonize;";
+    $ret .= "Could not load Daemon::Daemonize;";
 }
 
 if ( defined $ARGV[0] and $ARGV[0] eq 'autoconf' ) {
@@ -173,11 +173,11 @@ if ( defined $ARGV[0] and $ARGV[0] eq 'autoconf' ) {
     # Shouldn't autoconfigure as there's no reliable way to detect
     # serial devices.
     print "no";
-	if ($ret){
-		print " ($ret)\n";
-	} else	{
-		print " (can't auto-detect serial devices)\n";
-	};
+    if ($ret){
+        print " ($ret)\n";
+    } else  {
+        print " (can't auto-detect serial devices)\n";
+    };
     exit 0;
 }
 
@@ -186,37 +186,52 @@ my @lastread;
 my $daemon_pidfile =  "$Munin::Plugin::pluginstatedir/munin.currentcost.pidfile";
 my $value_spoolfile = "$Munin::Plugin::pluginstatedir/munin.currentcost.value-spool";
 my $config_spoolfile = "$Munin::Plugin::pluginstatedir/munin.currentcost.config-spool";
+my $cumulative_spoolfile = "$Munin::Plugin::pluginstatedir/munin.currentcost.cumulative-spool";
 
 
 ###### DAEMON ######
 sub run_daemon {
 
-	Daemon::Daemonize->write_pidfile($daemon_pidfile);
+    Daemon::Daemonize->write_pidfile($daemon_pidfile) unless $MUNIN_DEBUG;
 
     # Start by opening the serial port
-    my $tty = Device::SerialPort->new ($device_node) || die "Can't open $device_node: $!";
+    my $tty = new Device::SerialPort ($device_node) || die "Can't open $device_node: $!";
     $tty->baudrate($baud_rate)  || die "Can't set serial baud rate";
     $tty->parity("none")        || die "Can't set serial parity";
     $tty->databits(8)           || die "Can't set serial databits";
     $tty->handshake("none")     || die "Can't set serial handshake";
+    $tty->read_char_time(100);
+    $tty->read_const_time(100);
+    $tty->error_msg(1);
+    $tty->user_msg(1);
     $tty->write_settings        || die "Can't set serial parameters";
-	$tty->are_match("</msg>");	# Look for end of XML
 
-	my $daemonstarttime = time();
+    my $daemonstarttime = time();
+    my $ttybuffer = "";
 
     # We should be ready to talk to the CC now
-    while ($tty->lookfor){
+    while(1){
+        if (time() >= $daemonstarttime + 30 and $MUNIN_DEBUG) {
+            print STDERR "# " . (time() - $daemonstarttime) . " seconds have elapsed, stopping daemon\n";
+            return;
+        }
+        my $char = $tty->lookfor();
+        if ($char) {
+            $_ .= $char;
+        } else {
+            sleep(1);
+            next;
+        }
         print "# Read from device: $_\n" if $MUNIN_DEBUG;
-        if (m{(<msg>.*</msg>)}){
+        if (m{(<msg>.*?</msg>)}){
             my $xmlref = XML::Simple::XMLin ( $1, KeepRoot => 1);
+            s/$1//; # Remove the message from the buffer
 
             my $CC_Personality = $xmlref->{msg}->{src};
 
-            my $sensor;
-            my $temperature;
-            my @data;   # List of channel/units/value
+            my $valuehash;
 
-            my $timestamp = time();
+            $valuehash->{timestamp} = time();
             # Note that we COULD take a timestamp from the CC,
             # but as it only supplies HH:MM:SS, determining if
             # the timestamp is from a different day (i.e. around midnigh)
@@ -226,13 +241,17 @@ sub run_daemon {
             #
 
             if ($CC_Personality =~ /CC128/){
-                $sensor = $xmlref->{msg}->{sensor};
+                $valuehash->{sensor} = $xmlref->{msg}->{sensor};
             } elsif ($CC_Personality->{name} =~ /CC02/ ){
-                $sensor = 0;
+                $valuehash->{sensor} = 0;
             }
-            print "# Data for Sensor $sensor follows:\n" if $MUNIN_DEBUG;
+            if (!defined $valuehash->{sensor}){
+                print "# Not handling historical data\n" if $MUNIN_DEBUG;
+                next;
+            }
+            print "# Data for Sensor $valuehash->{sensor} follows:\n" if $MUNIN_DEBUG;
 
-            $temperature = $xmlref->{msg}->{tmpr};
+            $valuehash->{temperature} = $xmlref->{msg}->{tmpr};
                 
             foreach my $key ( keys %{ $xmlref->{msg} } ) {
                 if ( $key =~ /^ch(\d+)$/ ) {
@@ -241,12 +260,10 @@ sub run_daemon {
                     my $val  = $xmlref->{msg}->{"ch$channel"}->{$unit};
                     print "#   Channel $channel, Unit $unit, Value $val\n"
                       if $MUNIN_DEBUG;
-                    push @data,
-                      {
-                        "channel" => $channel,
-                        "unit"    => $unit,
-                        "value"   => $val
-                      };
+                    $valuehash->{$channel} = {
+                        unit  => $unit,
+                        value => $val,
+                    };
                 }
             }
 
@@ -258,49 +275,56 @@ sub run_daemon {
             seek ($spoolfile, 0, SEEK_END) or die "Can't seek in spoolfile: $!";
             # Spoolfile locked (and ready to append at end)
 
-            print $spoolfile encode_json(
-                {'timestamp' => $timestamp,
-                 'sensor' => $sensor,
-                 'temperature' => $temperature,
-                 'data' => @data}) . "\n";
+            print $spoolfile JSON->new->utf8->encode($valuehash) . "\n";
 
             flock($spoolfile, LOCK_UN) or die "Can't unlock spoolfile: $!";
 
-			close ($spoolfile);
+            close ($spoolfile);
 
-			# Also save list of sensors/channels/units to config spool
-			open ($spoolfile, '+<', "$config_spoolfile") || die "Can't open spoolfile ($config_spoolfile): $!";
+            # Also save list of sensors/channels/units to config spool
+            my $tempconfig;
+            eval {
+                open ($spoolfile, '<', "$config_spoolfile") || die "Can't open spoolfile ($config_spoolfile): $!";
 
-			flock ($spoolfile, LOCK_EX) or die "Can't lock spoolfile: $!";
-			seek ($spoolfile, 0, SEEK_SET) or die "Can't seek in spoolfile: $!";
+                flock ($spoolfile, LOCK_EX) or die "Can't lock spoolfile: $!";
+                seek ($spoolfile, 0, SEEK_SET) or die "Can't seek in spoolfile: $!";
 
-			my $tempconfig = decode_json (do { local $/ = <$spoolfile> });
+                $tempconfig = JSON->new->utf8->decode (do { local $/ = <$spoolfile> });
+                flock ($spoolfile, LOCK_UN) or die "Can't unlock spoolfile: $!";
+                close ($spoolfile);
+                1;
+            } or do {
+                print $@;
+            };
 
-			for my $datum (@data){
-				$tempconfig->{$sensor}->{$datum->{'channel'}} = $datum->{'unit'};
-			}
-			truncate($spoolfile,0);
-			seek ($spoolfile, 0, SEEK_SET) or die "Can't seek in spoolfile: $!";
-			print $spoolfile encode_json $tempconfig;
+            open ($spoolfile, '>', "$config_spoolfile") || die "Can't open spoolfile ($config_spoolfile): $!";
+            flock ($spoolfile, LOCK_EX) or die "Can't lock spoolfile: $!";
+            seek ($spoolfile, 0, SEEK_SET);
+
+            for my $channel (keys %$valuehash){
+                next unless $channel=~/^\d+$/;
+                $tempconfig->{$valuehash->{sensor}}->{$channel} = $valuehash->{$channel}->{unit};
+            }
+            truncate($spoolfile,0);
+            seek ($spoolfile, 0, SEEK_SET) or die "Can't seek in spoolfile: $!";
+            print $spoolfile JSON->new->utf8->encode ($tempconfig);
 
             flock($spoolfile, LOCK_UN) or die "Can't unlock spoolfile: $!";
 
-			close ($spoolfile);
+            close ($spoolfile);
 
         }
+        $_ = "";
 
-		sleep 1;
-		if (time() >= $daemonstarttime + 30 and $MUNIN_DEBUG) {
-			print STDERR "# 30 seconds have elapsed, stopping daemon";
-			return;
-		}
-		# Otherwise, just keep going.
+        sleep 1;
     }
 }
 
 ###### PLUGIN ######
 
 sub is_night_rate {
+    my $reftimeparam = $1 || time;
+    my @reftime = localtime($reftimeparam);
 
     # Determine if we're on night rate
     return 0 if not $nightrate;
@@ -309,11 +333,10 @@ sub is_night_rate {
     my ( $stop_h,     $stop_m )    = split /:/, $nightstop;
     my $start_time = $start_m + ( $start_h * 60 );
     my $stop_time  = $stop_m +  ( $stop_h * 60 );
-    my @now        = localtime(time);
-    my $now_time = $now[1] + ( $now[2] * 60 );
+    my $ref_time   = $reftime[1] + ( $reftime[2] * 60 );
 
-    if (   $now_time >= $start_time
-        or $now_time <= $stop_time )
+    if (   $ref_time >= $start_time
+        or $ref_time <= $stop_time )
     {
         print "# Night rate is ACTIVE\n" if $MUNIN_DEBUG;
         return 1;
@@ -334,30 +357,30 @@ Note: I can't find an official spec for this format so, for now, we're using the
 
  <msg>
     <date>
-        <dsb>00014</dsb>		Days since birth
-        <hr>14</hr>				\
-        <min>07</min>			 | The Time
-        <sec>07</sec>			/
+        <dsb>00014</dsb>        Days since birth
+        <hr>14</hr>             \
+        <min>07</min>            | The Time
+        <sec>07</sec>           /
     </date>
     <src>
-        <name>CC02</name>		Name of this Device
-        <id>03280</id>			Communication channel for device
-        <type>1</type>			Harware version
-        <sver>0.07</sver>		Software version
+        <name>CC02</name>       Name of this Device
+        <id>03280</id>          Communication channel for device
+        <type>1</type>          Harware version
+        <sver>0.07</sver>       Software version
     </src>
     <ch1>
-        <watts>00080</watts>	Value from the first channel
+        <watts>00080</watts>    Value from the first channel
     </ch1>
     <ch2>
-        <watts>00000</watts>	Value from the second channel
+        <watts>00000</watts>    Value from the second channel
     </ch2>
     <ch3>
-        <watts>00000</watts>	Value from the second channel
+        <watts>00000</watts>    Value from the second channel
     </ch3>
-    <tmpr>28.8</tmpr>			Current temperature (degrees celsius)
+    <tmpr>28.8</tmpr>           Current temperature (degrees celsius)
     <hist>
         <hrs>
-            <h02>000.0</h02>	Total kWh used in 2 hour blocks
+            <h02>000.0</h02>    Total kWh used in 2 hour blocks
             <h04>000.1</h04> 
             <h06>000.1</h06> 
             <h08>000.0</h08> 
@@ -372,7 +395,7 @@ Note: I can't find an official spec for this format so, for now, we're using the
             <h26>000.0</h26> 
         </hrs>
         <days>
-            <d01>0000</d01>		Total kWh used per day
+            <d01>0000</d01>     Total kWh used per day
             <d02>0000</d02> 
             <d03>0000</d03> 
             <d04>0000</d04> 
@@ -405,7 +428,7 @@ Note: I can't find an official spec for this format so, for now, we're using the
             <d31>0000</d31> 
         </days>
         <mths>
-            <m01>0000</m01>		Total kWh used per month
+            <m01>0000</m01>     Total kWh used per month
             <m02>0000</m02> 
             <m03>0000</m03> 
             <m04>0000</m04> 
@@ -419,7 +442,7 @@ Note: I can't find an official spec for this format so, for now, we're using the
             <m12>0000</m12> 
         </mths>
         <yrs>
-            <y1>0000000</y1>	Total kWh used per year
+            <y1>0000000</y1>    Total kWh used per year
             <y2>0000000</y2> 
             <y3>0000000</y3> 
             <y4>0000000</y4> 
@@ -452,35 +475,33 @@ For full definition, see L<http://www.currentcost.com/xx128/xml.html>
  
 =cut
 
-#my @cc_data = load_data();
-
 if ( defined $ARGV[0] and $ARGV[0] eq 'config' ) {
     if ($ret) {
         print $ret;
         exit 1;
     }
 
-	# Start the daemon
-	if ($MUNIN_DEBUG) {
-		print STDERR "# Will run collection daemon locally for 30 seconds...\n";
-		run_daemon();
-	} else {
-		if (Daemon::Daemonize->check_pidfile($daemon_pidfile) == 0){
-			Daemon::Daemonize->daemonize(run => &run_daemon);
-		}
-	}
+    # Start the daemon
+    if ($MUNIN_DEBUG) {
+        print STDERR "# Will run collection daemon locally for 30 seconds...\n";
+        run_daemon();
+    } else {
+        if (Daemon::Daemonize->check_pidfile($daemon_pidfile) == 0){
+            Daemon::Daemonize->daemonize(run => &run_daemon);
+        }
+    }
 
-	# Open the config spoolfile. That'll tell us what sensors/channels are available
-	open (my $spoolfile, '<', $config_spoolfile) || die "Can't open spoolfile ($config_spoolfile): $!";
-	flock ($spoolfile, LOCK_EX) or die "Can't lock spoolfile: $!";
-	seek ($spoolfile, 0, SEEK_SET) or die "Can't seek in spoolfile: $!";
+    # Open the config spoolfile. That'll tell us what sensors/channels are available
+    open (my $spoolfile, '<', $config_spoolfile) || die "Can't open spoolfile ($config_spoolfile): $!";
+    flock ($spoolfile, LOCK_EX) or die "Can't lock spoolfile: $!";
+    seek ($spoolfile, 0, SEEK_SET) or die "Can't seek in spoolfile: $!";
 
-	my $confighash = decode_json (do { local $/ = <$spoolfile> });
-	flock ($spoolfile, LOCK_UN) or die "Can't unlock spoolfile: $!";
-	close ($spoolfile);
+    my $confighash = JSON->new->utf8->decode (do { local $/ = <$spoolfile> });
+    flock ($spoolfile, LOCK_UN) or die "Can't unlock spoolfile: $!";
+    close ($spoolfile);
 
-	for my $sensor (keys %$confighash){
-		my $sensordata = $confighash->{$sensor};
+    for my $sensor (keys %$confighash){
+        my $sensordata = $confighash->{$sensor};
 
         if ( $sensor == 0 ) {
 
@@ -489,7 +510,7 @@ if ( defined $ARGV[0] and $ARGV[0] eq 'config' ) {
 multigraph currentcost
 graph_title CurrentCost Consumption
 graph_args --base 1000 -l 0
-graph_vlabel $sensordata->{$sensor->{0}}
+graph_vlabel $sensordata->{1}
 graph_category currentcost
 graph_info This graph shows the 'whole house' data.
 graph_total Total
@@ -526,7 +547,7 @@ EOF
 multigraph currentcost_cumulative
 graph_title CurrentCost Total Usage
 graph_args --base 1000 -l 0
-graph_vlabel $sensordata->{$sensor->{0}} * hours
+graph_vlabel $sensordata->{1} * hours
 graph_category currentcost
 EOF
             print "graph_order ";
@@ -579,7 +600,7 @@ EOF
 multigraph currentcost.appliance$sensor
 graph_title CurrentCost Consumption (Appliance $sensor)
 graph_args --base 1000 -l 0
-graph_vlabel $sensordata->{$sensor->{0}}
+graph_vlabel $sensordata->{1}
 graph_category currentcost
 graph_info This graph shows the data for Appliance $sensor
 graph_total Total
@@ -605,7 +626,7 @@ EOF
 multigraph currentcost_cumulative.appliance$sensor
 graph_title CurrentCost Total Usage (Appliance $sensor)
 graph_args --base 1000 -l 0
-graph_vlabel $sensordata->{$sensor->{0}} * hours
+graph_vlabel $sensordata->{1} * hours
 graph_category currentcost
 EOF
             print "graph_order ";
@@ -645,42 +666,123 @@ EOF
 }
 
 # Output the value data
-=cut
-for my $datum (@cc_data) {
-    if ( $datum->{sensor} == 0 ) {
+open (my $spoolfile, '<', $config_spoolfile) || die "Can't open spoolfile ($config_spoolfile): $!";
+flock ($spoolfile, LOCK_EX) or die "Can't lock spoolfile: $!";
+seek ($spoolfile, 0, SEEK_SET) or die "Can't seek in spoolfile: $!";
 
+my $confighash = JSON->new->utf8->decode (do { local $/ = <$spoolfile> });
+flock ($spoolfile, LOCK_UN) or die "Can't unlock spoolfile: $!";
+close ($spoolfile);
+
+open ($spoolfile, '+<', $value_spoolfile) || die "Can't open spoolfile ($value_spoolfile): $!";
+flock ($spoolfile, LOCK_EX) or die "Can't lock spoolfile: $!";
+seek ($spoolfile, 0, SEEK_SET) or die "Can't seek in spoolfile: $!";
+
+my @valuearr;
+while (<$spoolfile>){
+    push @valuearr, JSON->new->utf8->decode($_);
+}
+
+# Make sure to remove the old data from the spool file
+truncate ($spoolfile, 0);
+
+flock ($spoolfile, LOCK_UN) or die "Can't unlock spoolfile: $!";
+close ($spoolfile);
+
+# Finally, read (and update) the cumulative spool
+my $cumulativehash;
+if (-e $cumulative_spoolfile){
+    open($spoolfile, '<', $cumulative_spoolfile) || die "Can't open spoolfile ($cumulative_spoolfile): $!";
+    $cumulativehash = JSON->new->utf8->decode (do { local $/ = <$spoolfile> });
+    close($spoolfile);
+}
+for my $datum (sort {$a->{timestamp} <=> $b->{timestamp}} @valuearr){
+    my $lasttime = 0;
+    if (exists ($cumulativehash->{lasttime})) {
+        $lasttime = $cumulativehash->{lasttime};
+    } else {
+        $lasttime = $datum->{timestamp} - $tick_rate;
+    }
+
+    # How much of an hour is the measured period?
+    my $divisor = 3600 / ($datum->{timestamp} - $lasttime);
+
+    my @nowtime = localtime($datum->{timestamp});
+    my @thentime = localtime($lasttime);
+
+    my %is_new = (
+        daily   => ($nowtime[3] != $thentime[3]) ? 1 : 0,
+        monthly => ($nowtime[4] != $thentime[4]) ? 1 : 0,
+        yearly  => ($nowtime[5] != $thentime[5]) ? 1 : 0,
+    );
+    $is_new{ndaily}   = $is_new{daily};
+    $is_new{nmonthly} = $is_new{monthly};
+    $is_new{nyearly}  = $is_new{yearly};
+
+    for my $item (keys %$datum){
+        next unless $item=~/^\d+$/;
+        for my $period (qw(daily monthly yearly)){
+            $period = "n$period" if is_night_rate($datum->{timestamp});
+            if ($is_new{$period}){
+                print STDERR "# Start of a new $period period. Resetting counter\n" if $MUNIN_DEBUG;
+                $cumulativehash->{$datum->{sensor}}->{$item}->{$period} =
+                    $datum->{$item}->{value} / $divisor;
+            } else {
+                $cumulativehash->{$datum->{sensor}}->{$item}->{$period} +=
+                    $datum->{$item}->{value} / $divisor;
+            }
+            
+            # Also copy the new cumulative value back into the valuearr
+            $datum->{$item}->{$period} = $cumulativehash->{$datum->{sensor}}->{$item}->{$period};
+        }
+    }
+}
+                    
+
+for my $sensor (keys %$confighash){
+    my $sensordata = $confighash->{$sensor};
+
+    if ( $sensor == 0 ) {
         # Output the Root graph (being sensor 0)
         print "multigraph currentcost\n";
     }
     else {
-        my $sensor = $datum->{sensor};
         print "multigraph currentcost.appliance$sensor\n";
     }
-    foreach my $channel ( @{ $datum->{data} } ) {
-        my $fieldname = "ch" . $channel->{channel};
-        if ( is_night_rate() ) {
-            print "${fieldname}_n.value " . $channel->{value} . "\n";
-            print "${fieldname}.value 0\n";
-        }
-        else {
-            print "${fieldname}.value " . $channel->{value} . "\n";
-            print "${fieldname}_n.value 0\n";
+
+    foreach my $channel ( keys %$sensordata ) {
+        my $fieldname = "ch$channel";
+
+        foreach my $datum (@valuearr){
+            my $value = $datum->{$channel}->{value};
+            my $timestamp = $datum->{timestamp};
+            if ( is_night_rate($timestamp) ) {
+                print "${fieldname}_n.value $timestamp:$value\n";
+                print "${fieldname}.value $timestamp:0\n";
+            }
+            else {
+                print "${fieldname}.value $timestamp:$value\n";
+                print "${fieldname}_n.value $timestamp:0\n";
+            }
         }
     }
-    if ( $datum->{sensor} == 0 ) {
+    if ( $sensor == 0 ) {
 
         # Output the Root graph (being sensor 0)
         print "multigraph currentcost_cumulative\n";
     }
     else {
-        my $sensor = $datum->{sensor};
         print "multigraph currentcost_cumulative.appliance$sensor\n";
     }
-    foreach my $channel ( @{ $datum->{data} } ) {
-        my $fieldname = "ch" . $channel->{channel};
-        my $value     = $channel->{daily};
-        $value += $channel->{ndaily} if defined $channel->{ndaily};
-        print "${fieldname}_d.value $value\n";
+    foreach my $channel ( keys %$sensordata ) {
+        my $fieldname = "ch$channel";
+
+        foreach my $datum (@valuearr){
+            my $value     = $datum->{$channel}->{daily};
+            my $timestamp = $datum->{timestamp};
+            $value += $datum->{$channel}->{ndaily} if defined $datum->{$channel}->{ndaily};
+            print "${fieldname}_d.value $timestamp:$value\n";
+        }
     }
     my @now = localtime(time);
     if ( $now[3] == 1 and $now[2] == 0 and $now[1] <= 5 ) {
@@ -692,37 +794,41 @@ for my $datum (@cc_data) {
         print "fudge.value 1\n";
     }
 
-    if ( $datum->{sensor} == 0 ) {
+    if ( $sensor == 0 ) {
 
         # Output the Root Cost graph (being sensor 0)
         print "multigraph currentcost_cost\n";
     }
     else {
-        my $sensor = $datum->{sensor};
         print "multigraph currentcost_cost.appliance$sensor\n";
     }
-    foreach my $channel ( @{ $datum->{data} } ) {
-        my $fieldname = "ch" . $channel->{channel};
-        my $kWh       = $channel->{monthly} / 1000;
-        my $nightkWh  = $channel->{nmonthly} / 1000
-          if defined $channel->{nmonthly};
-        my $cost = $standingcharge;
-        if ( $nightrate and defined $nightkWh ) {
-            $cost = $nightkWh * $nightrate;
+    foreach my $channel ( keys %$sensordata ) {
+        my $fieldname = "ch" . $channel;
+
+        my $extinfo = "";
+        foreach my $datum (@valuearr){
+            my $timestamp = $datum->{timestamp};
+
+            my $kWh       = $datum->{$channel}->{monthly} / 1000;
+            my $nightkWh  = $datum->{$channel}->{nmonthly} / 1000
+              if defined $datum->{$channel}->{nmonthly};
+            my $cost = $standingcharge;
+            if ( $nightrate and defined $nightkWh ) {
+                $cost = $nightkWh * $nightrate;
+            }
+            if ( $kWh <= $rate1qty ) {
+                $cost += $kWh * $rate1;
+            }
+            else {
+                $cost += ( ( $kWh - $rate1qty ) * $rate2 ) + ( $rate1qty * $rate1 );
+            }
+            $cost = $cost / 100;    # Convert pence/cents into pounds/euros
+            print "$fieldname.value $timestamp:$cost\n";
+            $extinfo = sprintf( "Usage so far this month is %.3f kWh.", $kWh );
+            $extinfo .= sprintf( " Night usage so far this month is %.3f kWh.", $nightkWh )
+              if defined $nightkWh;
         }
-        if ( $kWh <= $rate1qty ) {
-            $cost += $kWh * $rate1;
-        }
-        else {
-            $cost += ( ( $kWh - $rate1qty ) * $rate2 ) + ( $rate1qty * $rate1 );
-        }
-        $cost = $cost / 100;    # Convert pence/cents into pounds/euros
-        print "$fieldname.value $cost\n";
-        my $extinfo = sprintf( "Usage is %.3f kWh.", $kWh );
-        $extinfo .= sprintf( " Night usage is %.3f kWh.", $nightkWh )
-          if defined $nightkWh;
         print "$fieldname.extinfo $extinfo\n";
     }
 }
-save_data(@cc_data);
 exit 0;
