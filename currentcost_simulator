@@ -1,0 +1,64 @@
+#!/usr/bin/perl
+
+use Getopt::Mixed;
+use POSIX qw(mkfifo strftime);
+use IO::Handle;
+
+# Get options
+Getopt::Mixed::init('d=s t=s device>d type>t');
+while (my ($option, $value, $pretty) = Getopt::Mixed::nextOption()) {
+		OPTION: {
+				$option eq 'd' and do {
+						$DevName = $value;
+						next OPTION;
+				};
+				$option eq 't' and do {
+						$DevType = $value;
+						next OPTION;
+				};
+		}
+}
+Getopt::Mixed::cleanup();
+die "You must specify a device (--device=???)" unless $DevName;
+if (not $DevType){
+		warn "Assuming CC128. Override with --type";
+		$DevType="CC128";
+}
+if (uc($DevType) ne "CC128" and uc($DevType) ne "CC02"){
+		die "Don't know how to simulate a $DevType device";
+}
+
+# Ready to go
+if ($DevName eq '-'){
+		$FIFO = *STDOUT;
+} else {
+	POSIX::mkfifo($DevName, 0700)		|| die "mkfifo $DevName failed: $!";
+	open ($FIFO, '>', $DevName)			|| die "Can't open fifo $DevName: $!";
+}
+$FIFO->autoflush;
+
+my $message;
+while (1) {
+		if (uc($DevType) eq "CC02"){
+				# Classic format
+				$message = "<msg><date><dsb>00001</dsb>";
+				$message .= POSIX::strftime("<hr>%H</hr><min>%M</min><sec>%S</sec>", localtime);
+				$message .= "<src><name>CC02</name><id>00000</id><type>1</type><sver>0.07</sver></src>";
+				$message .= "<ch1><watts>";
+				$message .= int(rand(10000));	# Random up to 1kW
+				$message .= "</watts></ch1><tmpr>";
+				$message .= sprintf("%.1f", rand(10)+20);	# Random 20 to 30
+				$message .= "</tmpr></msg>\n";
+		} else {
+				# New format
+				$message = "<msg><src>CC128-v0.11</src><dsb>0001</dsb>";
+				$message .= POSIX::strftime("<time>%H:%M:%S</time>", localtime);
+				$message .= sprintf("<tmpr>%.1f</tmpr>", rand(10)+20);
+				$message .= "<sensor>1</sensor><id>00000</id><type>1</type>";
+				$message .= "<ch1><watts>";
+				$message .= int(rand(10000));	# Random up to 1kW
+				$message .= "</watts></ch1></msg>\n";
+		}
+		print $FIFO $message;
+		sleep 6;
+}
