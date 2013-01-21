@@ -152,22 +152,13 @@ my $standingcharge = $ENV{standingcharge} || "0.0";    # pence/cents per month
 
 my $MUNIN_DEBUG = $ENV{MUNIN_DEBUG} || 0;
 
-my $ret;
-if ( !eval "require XML::Simple;" ) {
-    $ret .= "Could not load XML::Simple; ";
-}
-if ( !eval "require Device::SerialPort;" ) {
-    $ret .= "Could not load Device::SerialPort; ";
-}
-if ( !eval "require JSON;" ) {
-    $ret .= "Could not load JSON; ";
-}
-if ( !eval "require Time::Local;" ) {
-    $ret .= "Could not load Time::Local; ";
-}
+my @Required_Modules = qw(XML::Simple Device::SerialPort JSON Time::Local Proc::Daemon Log::Dispatch Log::Dispatch::File Date::Format File::Spec);
 
-if ( !eval "require Daemon::Daemonize;" ) {
-    $ret .= "Could not load Daemon::Daemonize;";
+my $ret;
+for my $module (@Required_Modules){
+    if ( !eval "require $module;" ) {
+        $ret .= "Could not load $module; ";
+    }
 }
 
 if ( defined $ARGV[0] and $ARGV[0] eq 'autoconf' ) {
@@ -185,32 +176,49 @@ if ( defined $ARGV[0] and $ARGV[0] eq 'autoconf' ) {
 }
 
 ## Configuration. You shouldn't need to change these
-my @lastread;
-my $daemon_pidfile = "$Munin::Plugin::pluginstatedir/munin.currentcost.pidfile";
-my $value_spoolfile =
+our @lastread;
+our $daemon_pidfile = "$Munin::Plugin::pluginstatedir/munin.currentcost.pidfile";
+our $value_spoolfile =
   "$Munin::Plugin::pluginstatedir/munin.currentcost.value-spool";
-my $config_spoolfile =
+our $config_spoolfile =
   "$Munin::Plugin::pluginstatedir/munin.currentcost.config-spool";
-my $cumulative_spoolfile =
+our $cumulative_spoolfile =
   "$Munin::Plugin::pluginstatedir/munin.currentcost.cumulative-spool";
+our $LOG_FILE = '/var/log/currentcost.log';
+our $ME = $0; $ME =~ s|.*/||;
+
+###### LOGGING ######
+my $log = new Log::Dispatch(
+    callbacks => sub { my %h=@_; return Date::Format::time2str('%B %e %T', time)." $0\[$$]: $h{message}\n";}
+);
+$log->add(Log::Dispatch::File->new( name      => 'file1',
+                                    min_level => $MUNIN_DEBUG ? 'debug' : 'warning',
+                                    mode      => 'append',
+                                    filename  => $LOG_FILE,));
+sub dienice($) {
+    my ($package, $filename, $line) = caller;
+    $log->critical("$_[0] at line $line in $filename");
+    die $_[0];
+}
 
 ###### DAEMON ######
 sub run_daemon {
 
-    Daemon::Daemonize->write_pidfile($daemon_pidfile) unless $MUNIN_DEBUG;
+    $log->warning("Daemon forked");
 
-    # Start by opening the serial port
-    my $tty = new Device::SerialPort($device_node)
-      || die "Can't open $device_node: $!";
-    $tty->baudrate($baud_rate) || die "Can't set serial baud rate";
-    $tty->parity("none")       || die "Can't set serial parity";
-    $tty->databits(8)          || die "Can't set serial databits";
-    $tty->handshake("none")    || die "Can't set serial handshake";
-    $tty->read_char_time(100);
-    $tty->read_const_time(100);
-    $tty->error_msg(1);
-    $tty->user_msg(1);
-    $tty->write_settings || die "Can't set serial parameters";
+#    # Start by opening the serial port
+#    my $tty = new Device::SerialPort($device_node)
+#      || die "Can't open $device_node: $!";
+#    $tty->baudrate($baud_rate) || die "Can't set serial baud rate";
+#    $tty->parity("none")       || die "Can't set serial parity";
+#    $tty->databits(8)          || die "Can't set serial databits";
+#    $tty->handshake("none")    || die "Can't set serial handshake";
+#    $tty->read_char_time(100);
+#    $tty->read_const_time(100);
+#    $tty->error_msg(1);
+#    $tty->user_msg(1);
+#    $tty->write_settings || die "Can't set serial parameters";
+    open (my $tty, '<', $device_node) || dienice "Can't open $device_node: $!";
 
     my $daemonstarttime = time();
     my $ttybuffer       = "";
@@ -218,12 +226,13 @@ sub run_daemon {
     # We should be ready to talk to the CC now
     while (1) {
         if ( time() >= $daemonstarttime + 30 and $MUNIN_DEBUG ) {
-            print STDERR "# "
-              . ( time() - $daemonstarttime )
-              . " seconds have elapsed, stopping daemon\n";
+            $log->warning (
+              ( time() - $daemonstarttime )
+              . " seconds have elapsed, stopping daemon");
             return;
         }
-        my $char = $tty->lookfor();
+#        my $char = $tty->lookfor();
+	my $char = <$tty>;
         if ($char) {
             $_ .= $char;
         }
@@ -231,7 +240,7 @@ sub run_daemon {
             sleep(1);
             next;
         }
-        print "# Read from device: $_\n" if $MUNIN_DEBUG;
+        $log->debug ("Read from device: $_") if $MUNIN_DEBUG;
         if (m{(<msg>.*?</msg>)}) {
             my $xmlref = XML::Simple::XMLin( $1, KeepRoot => 1 );
             s/$1//;    # Remove the message from the buffer
@@ -257,10 +266,10 @@ sub run_daemon {
                 $valuehash->{sensor} = 0;
             }
             if ( !defined $valuehash->{sensor} ) {
-                print "# Not handling historical data\n" if $MUNIN_DEBUG;
+                $log->info( "Not handling historical data") if $MUNIN_DEBUG;
                 next;
             }
-            print "# Data for Sensor $valuehash->{sensor} follows:\n"
+            $log->debug ("Data for Sensor $valuehash->{sensor} follows:")
               if $MUNIN_DEBUG;
 
             $valuehash->{temperature} = $xmlref->{msg}->{tmpr};
@@ -270,7 +279,7 @@ sub run_daemon {
                     my $channel = $1;
                     my $unit = ( keys %{ $xmlref->{msg}->{"ch$channel"} } )[0];
                     my $val  = $xmlref->{msg}->{"ch$channel"}->{$unit};
-                    print "#   Channel $channel, Unit $unit, Value $val\n"
+                    $log->debug("#   Channel $channel, Unit $unit, Value $val")
                       if $MUNIN_DEBUG;
                     $valuehash->{$channel} = {
                         unit  => $unit,
@@ -281,18 +290,18 @@ sub run_daemon {
 
             # Data read and parsed. Time to save it to the spoolfile
             open( my $spoolfile, '>>', "$value_spoolfile" )
-              || die "Can't open spoolfile ($value_spoolfile): $!";
+              || dienice "Can't open spoolfile ($value_spoolfile): $!";
 
             # Lock the value spoolfile
-            flock( $spoolfile, LOCK_EX ) or die "Can't lock spoolfile: $!";
+            flock( $spoolfile, LOCK_EX ) or dienice "Can't lock spoolfile: $!";
             seek( $spoolfile, 0, SEEK_END )
-              or die "Can't seek in spoolfile: $!";
+              or dienice "Can't seek in spoolfile: $!";
 
             # Spoolfile locked (and ready to append at end)
 
             print $spoolfile JSON->new->utf8->encode($valuehash) . "\n";
 
-            flock( $spoolfile, LOCK_UN ) or die "Can't unlock spoolfile: $!";
+            flock( $spoolfile, LOCK_UN ) or dienice "Can't unlock spoolfile: $!";
 
             close($spoolfile);
 
@@ -300,17 +309,17 @@ sub run_daemon {
             my $tempconfig;
             eval {
                 open( $spoolfile, '<', "$config_spoolfile" )
-                  || die "Can't open spoolfile ($config_spoolfile): $!";
+                  || dienice "Can't open spoolfile ($config_spoolfile): $!";
 
-                flock( $spoolfile, LOCK_EX ) or die "Can't lock spoolfile: $!";
+                flock( $spoolfile, LOCK_EX ) or dienice "Can't lock spoolfile: $!";
                 seek( $spoolfile, 0, SEEK_SET )
-                  or die "Can't seek in spoolfile: $!";
+                  or dienice "Can't seek in spoolfile: $!";
 
                 $tempconfig = JSON->new->utf8->decode(
                     do { local $/ = <$spoolfile> }
                 );
                 flock( $spoolfile, LOCK_UN )
-                  or die "Can't unlock spoolfile: $!";
+                  or dienice "Can't unlock spoolfile: $!";
                 close($spoolfile);
                 1;
             } or do {
@@ -318,8 +327,8 @@ sub run_daemon {
             };
 
             open( $spoolfile, '>', "$config_spoolfile" )
-              || die "Can't open spoolfile ($config_spoolfile): $!";
-            flock( $spoolfile, LOCK_EX ) or die "Can't lock spoolfile: $!";
+              || dienice "Can't open spoolfile ($config_spoolfile): $!";
+            flock( $spoolfile, LOCK_EX ) or dienice "Can't lock spoolfile: $!";
             seek( $spoolfile, 0, SEEK_SET );
 
             for my $channel ( keys %$valuehash ) {
@@ -329,10 +338,10 @@ sub run_daemon {
             }
             truncate( $spoolfile, 0 );
             seek( $spoolfile, 0, SEEK_SET )
-              or die "Can't seek in spoolfile: $!";
+              or dienice "Can't seek in spoolfile: $!";
             print $spoolfile JSON->new->utf8->encode($tempconfig);
 
-            flock( $spoolfile, LOCK_UN ) or die "Can't unlock spoolfile: $!";
+            flock( $spoolfile, LOCK_UN ) or dienice "Can't unlock spoolfile: $!";
 
             close($spoolfile);
 
@@ -510,10 +519,18 @@ if ( defined $ARGV[0] and $ARGV[0] eq 'config' ) {
         run_daemon();
     }
     else {
-        if ( Daemon::Daemonize->check_pidfile($daemon_pidfile) == 0 ) {
-            Daemon::Daemonize->daemonize( run => &run_daemon );
+        my $daemon = Proc::Daemon->new (
+            work_dir => $Munin::Plugin::pluginstatedir,
+            pid_file => $daemon_pidfile);
+        if ( $daemon->Status == 0 ) {
+            print STDERR "# Launching Daemon...\n";
+            my $ChildPID = $daemon->Init;
+            unless ($ChildPID){
+                run_daemon();
+            }
         }
     }
+    print STDERR "# Daemon running\n";
 
 # Open the config spoolfile. That'll tell us what sensors/channels are available
     open( my $spoolfile, '<', $config_spoolfile )

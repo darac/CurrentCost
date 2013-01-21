@@ -35,7 +35,7 @@ if ( $DevName eq '-' ) {
     $FIFO = *STDOUT;
 }
 else {
-    POSIX::mkfifo( $DevName, 0700 ) || die "mkfifo $DevName failed: $!";
+    POSIX::mkfifo( $DevName, 0777 ) || die "mkfifo $DevName failed: $!";
     open( $FIFO, '>', $DevName ) || die "Can't open fifo $DevName: $!";
 }
 $FIFO->autoflush;
@@ -67,6 +67,6 @@ while (1) {
         $message .= int( rand(10000) );                       # Random up to 1kW
         $message .= "</watts></ch1></msg>\n";
     }
-    print $FIFO $message;
+    print $FIFO $message || open ($FIFO, '>', $DevName) || die "Can't reopen FIFO: $!";
     sleep 6;
 }
