@@ -3,6 +3,7 @@
 use Getopt::Mixed;
 use POSIX qw(mkfifo strftime);
 use IO::Handle;
+use Time::HiRes qw(sleep);
 
 # Get options
 Getopt::Mixed::init('d=s t=s device>d type>t');
@@ -39,9 +40,22 @@ else {
     open( $FIFO, '>', $DevName ) || die "Can't open fifo $DevName: $!";
 }
 $FIFO->autoflush;
+*STDERR->autoflush;
+$|++;
 
 my $message;
+my $value = int (rand (10000)); # Random up to 10kW
+my $delta = 0;
 while (1) {
+	# Attempt to add some "Random Walk" properties
+	$delta = int(rand(100)) - 50;
+	$value += $delta;
+	# Reset if out of bounds
+	if ($value < 0 or $value >= 10000){
+		$value = int(rand(10000));
+		$delta = 0;
+	}
+
     if ( uc($DevType) eq "CC02" ) {
 
         # Classic format
@@ -50,9 +64,7 @@ while (1) {
           POSIX::strftime( "<hr>%H</hr><min>%M</min><sec>%S</sec>", localtime );
         $message .= "<src><name>CC02</name><id>00000</id>";
         $message .= "<type>1</type><sver>0.07</sver></src>";
-        $message .= "<ch1><watts>";
-        $message .= int( rand(10000) );                       # Random up to 1kW
-        $message .= "</watts></ch1><tmpr>";
+        $message .= "<ch1><watts>$value</watts></ch1><tmpr>";
         $message .= sprintf( "%.1f", rand(10) + 20 );         # Random 20 to 30
         $message .= "</tmpr></msg>\n";
     }
@@ -62,11 +74,11 @@ while (1) {
         $message = "<msg><src>CC128-v0.11</src><dsb>0001</dsb>";
         $message .= POSIX::strftime( "<time>%H:%M:%S</time>", localtime );
         $message .= sprintf( "<tmpr>%.1f</tmpr>", rand(10) + 20 );
-        $message .= "<sensor>1</sensor><id>00000</id><type>1</type>";
-        $message .= "<ch1><watts>";
-        $message .= int( rand(10000) );                       # Random up to 1kW
-        $message .= "</watts></ch1></msg>\n";
+        $message .= "<sensor>0</sensor><id>00000</id><type>1</type>";
+        $message .= "<ch1><watts>$value</watts></ch1></msg>\n";
     }
     print $FIFO $message || open ($FIFO, '>', $DevName) || die "Can't reopen FIFO: $!";
-    sleep 6;
+    printf STDERR "Current Reading: %5dW (%s %3dW)\r", $value, $delta > 0 ? "UP  " : "DOWN", abs($delta);
+    *STDERR->flush();
+    sleep rand()+5;
 }

@@ -155,7 +155,7 @@ my $MUNIN_DEBUG = $ENV{MUNIN_DEBUG} || 0;
 my @Required_Modules = qw(XML::Simple Device::SerialPort JSON Time::Local Proc::Daemon Log::Dispatch Log::Dispatch::File Date::Format File::Spec);
 
 my $ret;
-for my $module (@Required_Modules){
+for my $module (@Required_Modules) {
     if ( !eval "require $module;" ) {
         $ret .= "Could not load $module; ";
     }
@@ -177,26 +177,37 @@ if ( defined $ARGV[0] and $ARGV[0] eq 'autoconf' ) {
 
 ## Configuration. You shouldn't need to change these
 our @lastread;
-our $daemon_pidfile = "$Munin::Plugin::pluginstatedir/munin.currentcost.pidfile";
+our $daemon_pidfile =
+  "$Munin::Plugin::pluginstatedir/munin.currentcost.pidfile";
 our $value_spoolfile =
   "$Munin::Plugin::pluginstatedir/munin.currentcost.value-spool";
 our $config_spoolfile =
   "$Munin::Plugin::pluginstatedir/munin.currentcost.config-spool";
 our $cumulative_spoolfile =
   "$Munin::Plugin::pluginstatedir/munin.currentcost.cumulative-spool";
-our $LOG_FILE = '/var/log/currentcost.log';
-our $ME = $0; $ME =~ s|.*/||;
+our $LOG_FILE = '/var/log/currentcost';
+our $ME       = $0;
+$ME =~ s|.*/||;
 
 ###### LOGGING ######
 my $log = new Log::Dispatch(
-    callbacks => sub { my %h=@_; return Date::Format::time2str('%B %e %T', time)." $0\[$$]: $h{message}\n";}
+    callbacks => sub {
+        my %h = @_;
+        return Date::Format::time2str( '%B %e %T', time )
+          . " $0\[$$]: $h{message}\n";
+    }
 );
-$log->add(Log::Dispatch::File->new( name      => 'file1',
-                                    min_level => $MUNIN_DEBUG ? 'debug' : 'warning',
-                                    mode      => 'append',
-                                    filename  => $LOG_FILE,));
+$log->add(
+    Log::Dispatch::File->new(
+        name      => 'file1',
+        min_level => $MUNIN_DEBUG ? 'debug' : 'debug',
+        mode      => 'append',
+        filename  => "$LOG_FILE.log",
+    )
+);
+
 sub dienice($) {
-    my ($package, $filename, $line) = caller;
+    my ( $package, $filename, $line ) = caller;
     $log->critical("$_[0] at line $line in $filename");
     die $_[0];
 }
@@ -204,7 +215,20 @@ sub dienice($) {
 ###### DAEMON ######
 sub run_daemon {
 
+    my $log = new Log::Dispatch(
+        callbacks => sub {
+            my %h = @_;
+            return Date::Format::time2str( '%B %e %T', time )
+              . " $0\[$$]: $h{message}\n";
+        }
+    );
+
+#   $log->add(Log::Dispatch::File->new( name      => 'file2',
+#                                       min_level => $MUNIN_DEBUG ? 'debug' : 'debug',
+#                                       mode      => 'append',
+#                                       filename  => "$LOG_FILE.daemon.log",));
     $log->warning("Daemon forked");
+    print STDERR "Daemon forked";
 
 #    # Start by opening the serial port
 #    my $tty = new Device::SerialPort($device_node)
@@ -226,13 +250,12 @@ sub run_daemon {
     # We should be ready to talk to the CC now
     while (1) {
         if ( time() >= $daemonstarttime + 30 and $MUNIN_DEBUG ) {
-            $log->warning (
-              ( time() - $daemonstarttime )
-              . " seconds have elapsed, stopping daemon");
+            $log->warning( ( time() - $daemonstarttime )
+                . " seconds have elapsed, stopping daemon" );
             return;
         }
 #        my $char = $tty->lookfor();
-	my $char = <$tty>;
+    my $char = <$tty>;
         if ($char) {
             $_ .= $char;
         }
@@ -240,7 +263,7 @@ sub run_daemon {
             sleep(1);
             next;
         }
-        $log->debug ("Read from device: $_") if $MUNIN_DEBUG;
+        $log->debug("Read from device: $_") if $MUNIN_DEBUG;
         if (m{(<msg>.*?</msg>)}) {
             my $xmlref = XML::Simple::XMLin( $1, KeepRoot => 1 );
             s/$1//;    # Remove the message from the buffer
@@ -266,10 +289,10 @@ sub run_daemon {
                 $valuehash->{sensor} = 0;
             }
             if ( !defined $valuehash->{sensor} ) {
-                $log->info( "Not handling historical data") if $MUNIN_DEBUG;
+                $log->info("Not handling historical data") if $MUNIN_DEBUG;
                 next;
             }
-            $log->debug ("Data for Sensor $valuehash->{sensor} follows:")
+            $log->debug("Data for Sensor $valuehash->{sensor} follows:")
               if $MUNIN_DEBUG;
 
             $valuehash->{temperature} = $xmlref->{msg}->{tmpr};
@@ -279,7 +302,7 @@ sub run_daemon {
                     my $channel = $1;
                     my $unit = ( keys %{ $xmlref->{msg}->{"ch$channel"} } )[0];
                     my $val  = $xmlref->{msg}->{"ch$channel"}->{$unit};
-                    $log->debug("#   Channel $channel, Unit $unit, Value $val")
+                    $log->debug("   Channel $channel, Unit $unit, Value $val")
                       if $MUNIN_DEBUG;
                     $valuehash->{$channel} = {
                         unit  => $unit,
@@ -301,7 +324,8 @@ sub run_daemon {
 
             print $spoolfile JSON->new->utf8->encode($valuehash) . "\n";
 
-            flock( $spoolfile, LOCK_UN ) or dienice "Can't unlock spoolfile: $!";
+            flock( $spoolfile, LOCK_UN )
+              or dienice "Can't unlock spoolfile: $!";
 
             close($spoolfile);
 
@@ -311,7 +335,8 @@ sub run_daemon {
                 open( $spoolfile, '<', "$config_spoolfile" )
                   || dienice "Can't open spoolfile ($config_spoolfile): $!";
 
-                flock( $spoolfile, LOCK_EX ) or dienice "Can't lock spoolfile: $!";
+                flock( $spoolfile, LOCK_EX )
+                  or dienice "Can't lock spoolfile: $!";
                 seek( $spoolfile, 0, SEEK_SET )
                   or dienice "Can't seek in spoolfile: $!";
 
@@ -341,7 +366,8 @@ sub run_daemon {
               or dienice "Can't seek in spoolfile: $!";
             print $spoolfile JSON->new->utf8->encode($tempconfig);
 
-            flock( $spoolfile, LOCK_UN ) or dienice "Can't unlock spoolfile: $!";
+            flock( $spoolfile, LOCK_UN )
+              or dienice "Can't unlock spoolfile: $!";
 
             close($spoolfile);
 
@@ -360,21 +386,24 @@ sub is_night_rate {
 
     # Determine if we're on night rate
     return 0 if not $nightrate;
-    my ( $nightstart, $nightstop ) = split /-/, $nighthours;
-    my ( $start_h,    $start_m )   = split /:/, $nightstart;
-    my ( $stop_h,     $stop_m )    = split /:/, $nightstop;
-    my $start_time = $start_m + ( $start_h * 60 );
-    my $stop_time  = $stop_m +  ( $stop_h * 60 );
-    my $ref_time = $reftime[1] + ( $reftime[2] * 60 );
+    my ( $nightstart, $nightstop ) = split /-/, $nighthours;    $log->debug("Night Rate runs from $nightstart to $nightstop");
+    my ( $start_h,    $start_m )   = split /:/, $nightstart;    $log->debug("Night Rate starts at $start_h h, $start_m m");
+    my ( $stop_h,     $stop_m )    = split /:/, $nightstop;     $log->debug("Night Rate stops  at $stop_h h, $stop_m m");
+                                                                $log->debug("Reference time is    $reftime[2] h, $reftime[1] m");
+    my $start_time = $start_m * 60   + ( $start_h    * 3600 );
+    my $stop_time  = $stop_m * 60    + ( $stop_h     * 3600 );
+    my $ref_time   = $reftime[0] + $reftime[1] * 60 + ( $reftime[2] * 3600 );
+
+    $log->debug ("So, check if $start_time <= $ref_time <= $stop_time");
 
     if (   $ref_time >= $start_time
         or $ref_time <= $stop_time )
     {
-        print "# Night rate is ACTIVE\n" if $MUNIN_DEBUG;
+        $log->debug("Night rate was ACTIVE");
         return 1;
     }
     else {
-        print "# Night rate is enabled, but NOT active\n" if $MUNIN_DEBUG;
+        $log->debug("Night rate was enabled, but NOT active");
         return 0;
     }
 }
@@ -519,18 +548,21 @@ if ( defined $ARGV[0] and $ARGV[0] eq 'config' ) {
         run_daemon();
     }
     else {
-        my $daemon = Proc::Daemon->new (
-            work_dir => $Munin::Plugin::pluginstatedir,
-            pid_file => $daemon_pidfile);
+        my $daemon = Proc::Daemon->new(
+            work_dir     => $Munin::Plugin::pluginstatedir,
+            pid_file     => $daemon_pidfile,
+            child_STDOUT => "$LOG_FILE.daemon.out",
+            child_STDERR => "$LOG_FILE.daemon.err"
+        );
         if ( $daemon->Status == 0 ) {
-            print STDERR "# Launching Daemon...\n";
+            $log->info("Launching Daemon...");
             my $ChildPID = $daemon->Init;
-            unless ($ChildPID){
+            unless ($ChildPID) {
                 run_daemon();
             }
         }
     }
-    print STDERR "# Daemon running\n";
+    $log->info("Daemon running");
 
 # Open the config spoolfile. That'll tell us what sensors/channels are available
     open( my $spoolfile, '<', $config_spoolfile )
@@ -557,33 +589,35 @@ graph_args --base 1000 -l 0
 graph_vlabel $sensordata->{1}
 graph_category currentcost
 graph_info This graph shows the 'whole house' data.
-graph_total Total
 update_rate $tick_rate
 graph_data_size custom 1d, 10s for 1w, 1m for 1t, 5m for 1y
 EOF
+
+            print "graph_order ";
+            foreach my $channel ( sort keys %$sensordata ) {
+                print "ch${channel} ch${channel}_n ch${channel}_t ";
+            }
+            print "\n";
             foreach my $channel ( keys %$sensordata ) {
                 my $fieldname = "ch" . $channel;
                 print <<EOF;
-$fieldname.label Channel $channel
-$fieldname.type GAUGE
-$fieldname.min 0
-$fieldname.draw AREA
+${fieldname}.label Channel $channel
+${fieldname}.type GAUGE
+${fieldname}.min 0
+${fieldname}.draw AREA
+${fieldname}_n.label Channel $channel Night
+${fieldname}_n.type GAUGE
+${fieldname}_n.min 0
+${fieldname}_n.draw AREA
 ${fieldname}_t.label Channel $channel Trend
 ${fieldname}_t.type GAUGE
 ${fieldname}_t.min 0
 ${fieldname}_t.draw LINE2
+${fieldname}_t.update no
+${fieldname}_t.cdef ${fieldname},38400,TRENDNAN,${fieldname}_n,38400,TRENDNAN,ADDNAN
 EOF
-                if ($nightrate) {
-                    print <<EOF;
-${fieldname}_n.label Channel $channel Night
-${fieldname}_n.type GAUGE
-${fieldname}_n.min 0
-${fieldname}_t.cdef ${fieldname}_n,UN,${fieldname},${fieldname},IF,3600,TRENDNAN
-EOF
-                }
-                else {
-                    print "${fieldname}_t.cdef ${fieldname},3600,TRENDNAN\n";
-                }
+                print "${fieldname}_n.graph "
+                  . ( $nightrate ? "yes\n" : "no\n" );
             }
 
             # Output the Root cumulative graph
@@ -595,28 +629,40 @@ graph_vlabel $sensordata->{1} * hours
 graph_category currentcost
 EOF
             print "graph_order ";
-            my $confstr = '';
+            foreach my $channel ( sort keys %$sensordata ) {
+                print "ch${channel}=currentcost.ch${channel} ch${channel}_n=currentcost.ch${channel}_n ch${channel}_s ch${channel}_d ch${channel}_m  ch${channel}_y ";
+            }
+            print "\n";
+
             foreach my $channel ( sort keys %$sensordata ) {
                 my $fieldname = "ch" . $channel;
-                print "${fieldname}=currentcost.$fieldname ${fieldname}_d ";
-                $confstr .= <<EOF;
-${fieldname}.update no
-${fieldname}.label Channel $channel
-${fieldname}.type GAUGE
-${fieldname}.min 0
-${fieldname}.cdef PREV,${fieldname},12,/,ADDNAN
+
+                print <<EOF;
+${fieldname}.graph no
+${fieldname}_n.graph no
+${fieldname}_s.update no
+${fieldname}_s.label Channel $channel
+${fieldname}_s.type GAUGE
+${fieldname}_s.draw AREA
+${fieldname}_s.min 0
+${fieldname}_s.cdef PREV,${fieldname},${fieldname}_n,ADDNAN,12,/,ADDNAN
 ${fieldname}_d.label Channel $channel Daily
 ${fieldname}_d.type GAUGE
 ${fieldname}_d.min 0
+${fieldname}_d.cdef TIME,86400,%,3600,LT,0,PREV,${fieldname},${fieldname}_n,ADDNAN,12,/,ADDNAN,IF
+${fieldname}_d.update no
+${fieldname}_m.label Channel $channel Monthly
+${fieldname}_m.type GAUGE
+${fieldname}_m.min 0
+${fieldname}_m.cdef TIME,2629800,%,3600,LT,0,PREV,${fieldname},${fieldname}_n,ADDNAN,12,/,ADDNAN,IF
+${fieldname}_m.update no
+${fieldname}_y.label Channel $channel Yearly
+${fieldname}_y.type GAUGE
+${fieldname}_y.min 0
+${fieldname}_y.cdef TIME,31557600,%,3600,LT,0,PREV,${fieldname},${fieldname}_n,ADDNAN,12,/,ADDNAN,IF
+${fieldname}_y.update no
 EOF
             }
-            print "\n$confstr";
-            print <<EOF;
-fudge.label (fudge)
-fudge.type GAUGE
-fudge.graph yes
-fudge.draw LINE0
-EOF
 
             # Output the root cost graph
             print <<EOF;
@@ -627,83 +673,127 @@ graph_vlabel ${currency}
 graph_category currentcost
 graph_total Total
 EOF
+
+            print "graph_order ";
+            foreach my $channel ( sort keys %$sensordata ) {
+                print "ch${channel}=currentcost.ch${channel} ch${channel}_n=currentcost.ch${channel}_n ch${channel}_cost ";
+            }
+            print "\n";
+
+            # Cost (in pence) is: 
+            #   Standing Charge +
+            #   Monthly Night Value / 1000 * Night Rate +
+            #   IF Monthly Value < Rate1Qty
+            #     Monthly Value / 1000 * Rate 1
+            #   ELSE
+            #     Monthly Value - Rate1Qty * Rate 2 +
+            #     Rate1Qty * Rate 1
+            #   END IF
+            #
+            #   A + B + C =>  A,B,+,C,+
+            #
+            #   A = ${standingcharge}
+            #   B = ${fieldname}_n,1000,/,${nightrate},*
+            #   C = D,T,F,IF
+            #   D = ${fieldname},1000,/,${rate1qty},LT
+            #   T = ${fieldname},1000,/,${rate1l},*
+            #   F = ${fieldname},1000,/,${rate1qty},-,${rate2},*,${rate1qty},${rate1},*,+
+
             foreach my $channel ( keys %$sensordata ) {
                 my $fieldname = "ch" . $channel;
                 print <<EOF;
-$fieldname.label Channel $channel
-$fieldname.type GAUGE
-$fieldname.min 0
+${fieldname}.label Channel $channel Day
+${fieldname}.graph no
+${fieldname}_n.label Channel $channel Night
+${fieldname}_n.graph no
+${fieldname}_c.label Channel $channel Cumulative
+${fieldname}_c.type GAUGE
+${fieldname}_c.min 0
+${fieldname}_c.update no
+${fieldname}_c.graph no
+${fieldname}_c.cdef PREV,${fieldname},12,/,ADDNAN
+${fieldname}_nc.label Channel $channel Night Cumulative
+${fieldname}_nc.type GAUGE
+${fieldname}_nc.min 0
+${fieldname}_nc.update no
+${fieldname}_nc.graph no
+${fieldname}_nc.cdef PREV,${fieldname}_n,12,/,ADDNAN
+${fieldname}_tot.label Channel $channel
+${fieldname}_tot.type GAUGE
+${fieldname}_tot.min 0
+${fieldname}_tot.update no
+${fieldname}_tot.cdef ${standingcharge},${fieldname}_nc,1000,/,${nightrate},*,${fieldname}_c,1000,/,${rate1qty},LT,${fieldname}_c,1000,/,${rate1},*,${fieldname}_c,1000,/,${rate1qty},-,${rate2},*,${rate1qty},${rate1},*,ADDNAN,IF,ADDNAN,ADDNAN,100,/
 EOF
             }
 
         }
         else {
-
-            # Output a subordinate graph (being an appliance)
-            print <<EOF;
-multigraph currentcost.appliance$sensor
-graph_title CurrentCost Consumption (Appliance $sensor)
-graph_args --base 1000 -l 0
-graph_vlabel $sensordata->{1}
-graph_category currentcost
-graph_info This graph shows the data for Appliance $sensor
-graph_total Total
-EOF
-            foreach my $channel ( keys %$sensordata ) {
-                my $fieldname = "ch" . $channel;
-                print <<EOF;
-$fieldname.label Channel $channel
-$fieldname.type GAUGE
-$fieldname.min 0
-EOF
-                if ($nightrate) {
-                    print <<EOF;
-${fieldname}_n.label Channel $channel Night
-${fieldname}_n.type GAUGE
-${fieldname}_n.min 0
-EOF
-                }
-            }
-
-            # Output the subordinate cumulative graph
-            print <<EOF;
-multigraph currentcost_cumulative.appliance$sensor
-graph_title CurrentCost Total Usage (Appliance $sensor)
-graph_args --base 1000 -l 0
-graph_vlabel $sensordata->{1} * hours
-graph_category currentcost
-EOF
-            print "graph_order ";
-            my $confstr = '';
-            foreach my $channel ( sort keys %$sensordata ) {
-                my $fieldname = "ch" . $channel;
-                print "$fieldname=currentcost.$fieldname ";
-                $confstr .= <<EOF;
-$fieldname.label Channel $channel
-$fieldname.type GAUGE
-$fieldname.min 0
-$fieldname.cdef PREV,$fieldname,12,/,ADDNAN
-EOF
-            }
-            print "\n$confstr";
-
-            # Output the subordinate Cost graph
-            print <<EOF;
-multigraph currentcost_cost.appliance$sensor
-graph CurrentCost Estimated Cost (Appliance $sensor)
-graph_args --base 1000 -l 0
-graph_vlabel ${currency}
-graph_category currentcost
-graph_total Total
-EOF
-            foreach my $channel ( keys %$sensordata ) {
-                my $fieldname = "ch" . $channel;
-                print <<EOF;
-$fieldname.label Channel $channel
-$fieldname.type GAUGE
-$fieldname.min 0
-EOF
-            }
+#
+#            # Output a subordinate graph (being an appliance)
+#            print <<EOF;
+#multigraph currentcost.appliance$sensor
+#graph_title CurrentCost Consumption (Appliance $sensor)
+#graph_args --base 1000 -l 0
+#graph_vlabel $sensordata->{1}
+#graph_category currentcost
+#graph_info This graph shows the data for Appliance $sensor
+#graph_total Total
+#EOF
+#            foreach my $channel ( keys %$sensordata ) {
+#                my $fieldname = "ch" . $channel;
+#                print <<EOF;
+#$fieldname.label Channel $channel
+#$fieldname.type GAUGE
+#$fieldname.min 0
+#EOF
+#                if ($nightrate) {
+#                    print <<EOF;
+#${fieldname}_n.label Channel $channel Night
+#${fieldname}_n.type GAUGE
+#${fieldname}_n.min 0
+#EOF
+#                }
+#            }
+#
+#            # Output the subordinate cumulative graph
+#            print <<EOF;
+#multigraph currentcost_cumulative.appliance$sensor
+#graph_title CurrentCost Total Usage (Appliance $sensor)
+#graph_args --base 1000 -l 0
+#graph_vlabel $sensordata->{1} * hours
+#graph_category currentcost
+#EOF
+#            print "graph_order ";
+#            my $confstr = '';
+#            foreach my $channel ( sort keys %$sensordata ) {
+#                my $fieldname = "ch" . $channel;
+#                print "$fieldname=currentcost.$fieldname ";
+#                $confstr .= <<EOF;
+#$fieldname.label Channel $channel
+#$fieldname.type GAUGE
+#$fieldname.min 0
+#$fieldname.cdef PREV,$fieldname,12,/,ADDNAN
+#EOF
+#            }
+#            print "\n$confstr";
+#
+#            # Output the subordinate Cost graph
+#            print <<EOF;
+#multigraph currentcost_cost.appliance$sensor
+#graph CurrentCost Estimated Cost (Appliance $sensor)
+#graph_args --base 1000 -l 0
+#graph_vlabel ${currency}
+#graph_category currentcost
+#graph_total Total
+#EOF
+#            foreach my $channel ( keys %$sensordata ) {
+#                my $fieldname = "ch" . $channel;
+#                print <<EOF;
+#$fieldname.label Channel $channel
+#$fieldname.type GAUGE
+#$fieldname.min 0
+#EOF
+#            }
         }
     }
     exit 0;
@@ -738,62 +828,63 @@ flock( $spoolfile, LOCK_UN ) or die "Can't unlock spoolfile: $!";
 close($spoolfile);
 
 # Finally, read (and update) the cumulative spool
-my $cumulativehash;
-if ( -e $cumulative_spoolfile ) {
-    open( $spoolfile, '<', $cumulative_spoolfile )
-      || die "Can't open spoolfile ($cumulative_spoolfile): $!";
-    $cumulativehash = JSON->new->utf8->decode(
-        do { local $/ = <$spoolfile> }
-    );
-    close($spoolfile);
-}
-for my $datum ( sort { $a->{timestamp} <=> $b->{timestamp} } @valuearr ) {
-    my $lasttime = 0;
-    if ( exists( $cumulativehash->{lasttime} ) ) {
-        $lasttime = $cumulativehash->{lasttime};
-    }
-    else {
-        $lasttime = $datum->{timestamp} - $tick_rate;
-    }
+#my $cumulativehash;
+#if ( -e $cumulative_spoolfile ) {
+#    open( $spoolfile, '<', $cumulative_spoolfile )
+#      || die "Can't open spoolfile ($cumulative_spoolfile): $!";
+#    $cumulativehash = JSON->new->utf8->decode(
+#        do { local $/ = <$spoolfile> }
+#    );
+#    close($spoolfile);
+#}
+#for my $datum ( sort { $a->{timestamp} <=> $b->{timestamp} } @valuearr ) {
+#    my $lasttime = 0;
+#    if ( exists( $cumulativehash->{lasttime} ) ) {
+#        $lasttime = $cumulativehash->{lasttime};
+#    }
+#    else {
+#        $lasttime = $datum->{timestamp} - $tick_rate;
+#    }
+#
+#    # How much of an hour is the measured period?
+#    my $divisor = 3600 / ( $datum->{timestamp} - $lasttime );
+#
+#    my @nowtime  = localtime( $datum->{timestamp} );
+#    my @thentime = localtime($lasttime);
+#
+#    my %is_new = (
+#        daily   => ( $nowtime[3] != $thentime[3] ) ? 1 : 0,
+#        monthly => ( $nowtime[4] != $thentime[4] ) ? 1 : 0,
+#        yearly  => ( $nowtime[5] != $thentime[5] ) ? 1 : 0,
+#    );
+#    $is_new{ndaily}   = $is_new{daily};
+#    $is_new{nmonthly} = $is_new{monthly};
+#    $is_new{nyearly}  = $is_new{yearly};
+#
+#    for my $item ( keys %$datum ) {
+#        next unless $item =~ /^\d+$/;
+#        for my $period (qw(daily monthly yearly)) {
+#            $period = "n$period" if is_night_rate( $datum->{timestamp} );
+#            if ( $is_new{$period} ) {
+#                print STDERR
+#                  "# Start of a new $period period. Resetting counter\n"
+#                  if $MUNIN_DEBUG;
+#                $cumulativehash->{ $datum->{sensor} }->{$item}->{$period} =
+#                  $datum->{$item}->{value} / $divisor;
+#            }
+#            else {
+#                $cumulativehash->{ $datum->{sensor} }->{$item}->{$period} +=
+#                  $datum->{$item}->{value} / $divisor;
+#            }
+#
+#            # Also copy the new cumulative value back into the valuearr
+#            $datum->{$item}->{$period} =
+#              $cumulativehash->{ $datum->{sensor} }->{$item}->{$period};
+#        }
+#    }
+#}
 
-    # How much of an hour is the measured period?
-    my $divisor = 3600 / ( $datum->{timestamp} - $lasttime );
-
-    my @nowtime  = localtime( $datum->{timestamp} );
-    my @thentime = localtime($lasttime);
-
-    my %is_new = (
-        daily   => ( $nowtime[3] != $thentime[3] ) ? 1 : 0,
-        monthly => ( $nowtime[4] != $thentime[4] ) ? 1 : 0,
-        yearly  => ( $nowtime[5] != $thentime[5] ) ? 1 : 0,
-    );
-    $is_new{ndaily}   = $is_new{daily};
-    $is_new{nmonthly} = $is_new{monthly};
-    $is_new{nyearly}  = $is_new{yearly};
-
-    for my $item ( keys %$datum ) {
-        next unless $item =~ /^\d+$/;
-        for my $period (qw(daily monthly yearly)) {
-            $period = "n$period" if is_night_rate( $datum->{timestamp} );
-            if ( $is_new{$period} ) {
-                print STDERR
-                  "# Start of a new $period period. Resetting counter\n"
-                  if $MUNIN_DEBUG;
-                $cumulativehash->{ $datum->{sensor} }->{$item}->{$period} =
-                  $datum->{$item}->{value} / $divisor;
-            }
-            else {
-                $cumulativehash->{ $datum->{sensor} }->{$item}->{$period} +=
-                  $datum->{$item}->{value} / $divisor;
-            }
-
-            # Also copy the new cumulative value back into the valuearr
-            $datum->{$item}->{$period} =
-              $cumulativehash->{ $datum->{sensor} }->{$item}->{$period};
-        }
-    }
-}
-
+$log->info( "Sending " . scalar(@valuearr) . " data points" );
 for my $sensor ( keys %$confighash ) {
     my $sensordata = $confighash->{$sensor};
 
@@ -809,85 +900,100 @@ for my $sensor ( keys %$confighash ) {
     foreach my $channel ( keys %$sensordata ) {
         my $fieldname = "ch$channel";
 
+        my $nightcount = 0;
+
         foreach my $datum (@valuearr) {
             my $value     = $datum->{$channel}->{value};
             my $timestamp = $datum->{timestamp};
             if ( is_night_rate($timestamp) ) {
                 print "${fieldname}_n.value $timestamp:$value\n";
                 print "${fieldname}.value $timestamp:0\n";
+                $nightcount++;
             }
             else {
                 print "${fieldname}.value $timestamp:$value\n";
                 print "${fieldname}_n.value $timestamp:0\n";
             }
         }
-    }
-    if ( $sensor == 0 ) {
-
-        # Output the Root graph (being sensor 0)
-        print "multigraph currentcost_cumulative\n";
-    }
-    else {
-        print "multigraph currentcost_cumulative.appliance$sensor\n";
-    }
-    foreach my $channel ( keys %$sensordata ) {
-        my $fieldname = "ch$channel";
-
-        foreach my $datum (@valuearr) {
-            my $value     = $datum->{$channel}->{daily};
-            my $timestamp = $datum->{timestamp};
-            $value += $datum->{$channel}->{ndaily}
-              if defined $datum->{$channel}->{ndaily};
-            print "${fieldname}_d.value $timestamp:$value\n";
-        }
-    }
-    my @now = localtime(time);
-    if ( $now[3] == 1 and $now[2] == 0 and $now[1] <= 5 ) {
-
-        # First reading of month, reset.
-        print "fudge.value 0\n";
-    }
-    else {
-        print "fudge.value 1\n";
+        $log->info("...of which $nightcount were Night readings");
     }
 
-    if ( $sensor == 0 ) {
-
-        # Output the Root Cost graph (being sensor 0)
-        print "multigraph currentcost_cost\n";
-    }
-    else {
-        print "multigraph currentcost_cost.appliance$sensor\n";
-    }
-    foreach my $channel ( keys %$sensordata ) {
-        my $fieldname = "ch" . $channel;
-
-        my $extinfo = "";
-        foreach my $datum (@valuearr) {
-            my $timestamp = $datum->{timestamp};
-
-            my $kWh      = $datum->{$channel}->{monthly} / 1000;
-            my $nightkWh = $datum->{$channel}->{nmonthly} / 1000
-              if defined $datum->{$channel}->{nmonthly};
-            my $cost = $standingcharge;
-            if ( $nightrate and defined $nightkWh ) {
-                $cost = $nightkWh * $nightrate;
-            }
-            if ( $kWh <= $rate1qty ) {
-                $cost += $kWh * $rate1;
-            }
-            else {
-                $cost +=
-                  ( ( $kWh - $rate1qty ) * $rate2 ) + ( $rate1qty * $rate1 );
-            }
-            $cost = $cost / 100;    # Convert pence/cents into pounds/euros
-            print "$fieldname.value $timestamp:$cost\n";
-            $extinfo = sprintf( "Usage so far this month is %.3f kWh.", $kWh );
-            $extinfo .= sprintf( " Night usage so far this month is %.3f kWh.",
-                $nightkWh )
-              if defined $nightkWh;
-        }
-        print "$fieldname.extinfo $extinfo\n";
-    }
+#    if ( $sensor == 0 ) {
+#
+#        # Output the Root graph (being sensor 0)
+#        print "multigraph currentcost_cumulative\n";
+#    }
+#    else {
+#        print "multigraph currentcost_cumulative.appliance$sensor\n";
+#    }
+#    foreach my $channel ( keys %$sensordata ) {
+#        my $fieldname = "ch$channel";
+#
+#        foreach my $datum (@valuearr) {
+#            my $value     = $datum->{$channel}->{daily};
+#            my $timestamp = $datum->{timestamp};
+#            $value += $datum->{$channel}->{ndaily}
+#              if defined $datum->{$channel}->{ndaily};
+#            print "${fieldname}_d.value $timestamp:$value\n";
+#        }
+#    }
+#    my @now = localtime(time);
+#    if ( $now[3] == 1 and $now[2] == 0 and $now[1] <= 5 ) {
+#
+#        # First reading of month, reset.
+#        print "fudge.value 0\n";
+#    }
+#    else {
+#        print "fudge.value 1\n";
+#    }
+#
+#    if ( $sensor == 0 ) {
+#
+#        # Output the Root Cost graph (being sensor 0)
+#        print "multigraph currentcost_cost\n";
+#    }
+#    else {
+#        print "multigraph currentcost_cost.appliance$sensor\n";
+#    }
+#    foreach my $channel ( keys %$sensordata ) {
+#        my $fieldname = "ch" . $channel;
+#
+#        my $extinfo = "";
+#        foreach my $datum (@valuearr) {
+#            my $timestamp = $datum->{timestamp};
+#
+#            # Cost (in pence) is:
+#            #   Standing Charge +
+#            #   Monthly Night Value / 1000 * Night Rate +
+#            #   IF Monthly Value < Rate1Qty
+#            #     Monthly Value / 1000 * Rate 1
+#            #   ELSE
+#            #     Monthly Value - Rate1Qty * Rate 2 +
+#            #     Rate1Qty * Rate 1
+#            #   END IF
+#
+#            my $kWh      = $datum->{$channel}->{monthly} / 1000;
+#            my $nightkWh = $datum->{$channel}->{nmonthly} / 1000
+#              if defined $datum->{$channel}->{nmonthly};
+#            my $cost = $standingcharge;
+#            if ( $nightrate and defined $nightkWh ) {
+#                $cost += $nightkWh * $nightrate;
+#            }
+#            if ( $kWh <= $rate1qty ) {
+#                $cost += $kWh * $rate1;
+#            }
+#            else {
+#                $cost +=
+#                  ( ( $kWh - $rate1qty ) * $rate2 ) + ( $rate1qty * $rate1 );
+#            }
+#            $cost = $cost / 100;    # Convert pence/cents into pounds/euros
+#            print "${fieldname}_calc.value $timestamp:$cost\n";
+#            $extinfo = sprintf( "Usage so far this month is %.3f kWh.", $kWh );
+#            $extinfo .= sprintf( " Night usage so far this month is %.3f kWh.",
+#                $nightkWh )
+#              if defined $nightkWh;
+#        }
+#        print "$fieldname.extinfo $extinfo\n";
+#    }
 }
 exit 0;
