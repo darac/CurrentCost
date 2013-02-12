@@ -122,7 +122,7 @@ Paul Saunders L<darac@darac.org.uk>
 
 =cut
 
-#vim: set autoindent expandtab tabstop=4 shiftwidth=4
+#vim: set autoindent expandtab tabstop=4 shiftwidth=4 filetype=perl
 
 use strict;
 use warnings;
@@ -134,12 +134,10 @@ need_multigraph();
 
 my $device_node = $ENV{device} || "/dev/ttyUSB0";
 my $baud_rate   = $ENV{baud}   || "2400";           # or 9600 or 57600
-my $tick_rate   = $ENV{tick}   || "6";
-
-# Tick_Rate is how long to consider data valid for (in seconds)
+my $tick_rate   = $ENV{tick}   || "6";              # Tick_Rate is how long to consider data valid for (in seconds)
 
 # Costs
-my $currency  = $ENV{currency}  || "£";      # £ or €
+my $currency  = $ENV{currency}  || "£";       # £ or €
 my $rate1     = $ENV{rate1}     || "13.9";    # in pence/cents
 my $rate1qty  = $ENV{rate1qty}  || "900";     # in kWh, 0 to use fixed rate2
 my $rate2     = $ENV{rate2}     || "8.2";     # in pence/cents
@@ -183,8 +181,6 @@ our $value_spoolfile =
   "$Munin::Plugin::pluginstatedir/munin.currentcost.value-spool";
 our $config_spoolfile =
   "$Munin::Plugin::pluginstatedir/munin.currentcost.config-spool";
-our $cumulative_spoolfile =
-  "$Munin::Plugin::pluginstatedir/munin.currentcost.cumulative-spool";
 our $LOG_FILE = '/var/log/currentcost';
 our $ME       = $0;
 $ME =~ s|.*/||;
@@ -209,7 +205,7 @@ $log->add(
 sub dienice($) {
     my ( $package, $filename, $line ) = caller;
     $log->critical("$_[0] at line $line in $filename");
-    die $_[0];
+    die "$_[0] at line $line in $filename\n";
 }
 
 ###### DAEMON ######
@@ -223,48 +219,97 @@ sub run_daemon {
         }
     );
 
-#   $log->add(Log::Dispatch::File->new( name      => 'file2',
-#                                       min_level => $MUNIN_DEBUG ? 'debug' : 'debug',
-#                                       mode      => 'append',
-#                                       filename  => "$LOG_FILE.daemon.log",));
-    $log->warning("Daemon forked");
-    print STDERR "Daemon forked";
+    $log->add(Log::Dispatch::File->new( name      => 'file2',
+                                        min_level => $MUNIN_DEBUG ? 'debug' : 'debug',
+                                        mode      => 'append',
+                                        filename  => "$LOG_FILE.daemon.log",));
+    sub dienice($) {
+        my ( $package, $filename, $line ) = caller;
+        $log->critical("$_[0] at line $line in $filename");
+        die "$_[0] at line $line in $filename\n";
+    }
 
-#    # Start by opening the serial port
-#    my $tty = new Device::SerialPort($device_node)
-#      || die "Can't open $device_node: $!";
-#    $tty->baudrate($baud_rate) || die "Can't set serial baud rate";
-#    $tty->parity("none")       || die "Can't set serial parity";
-#    $tty->databits(8)          || die "Can't set serial databits";
-#    $tty->handshake("none")    || die "Can't set serial handshake";
-#    $tty->read_char_time(100);
-#    $tty->read_const_time(100);
-#    $tty->error_msg(1);
-#    $tty->user_msg(1);
-#    $tty->write_settings || die "Can't set serial parameters";
-    open (my $tty, '<', $device_node) || dienice "Can't open $device_node: $!";
+    $log->info("I am the child");
+    print STDERR "Daemon forked" if $MUNIN_DEBUG;
+
+    local $SIG{TERM} = sub { $log->warning( "SIGTERM received. Stopping"); kill 'KILL', $$ };
+
+    my $tty;
+    eval {
+        local $SIG{ALRM} = sub {die "Alarm"};
+        alarm 10;
+        if (-p $device_node){
+            # Device is a Pipe. So probably the Simulator
+            open ($tty, '<', $device_node) || dienice "Can't open $device_node: $!";
+        } else {
+            # Not a pipe. Probably a real CurrentCost
+            # Start by opening the serial port
+            my $tty = new Device::SerialPort($device_node)
+              || die "Can't open $device_node: $!";
+            $tty->baudrate($baud_rate) || die "Can't set serial baud rate";
+            $tty->parity("none")       || die "Can't set serial parity";
+            $tty->databits(8)          || die "Can't set serial databits";
+            $tty->handshake("none")    || die "Can't set serial handshake";
+            $tty->read_char_time(100);
+            $tty->read_const_time(100);
+            $tty->error_msg(1);
+            $tty->user_msg(1);
+            $tty->write_settings || die "Can't set serial parameters";
+        }
+        alarm 0;
+    };
+    if ($@ && $@ =~ /Alarm/){$log->warning("Alarm while opening device"); die};
+    $log->info("Device open");
 
     my $daemonstarttime = time();
     my $ttybuffer       = "";
+    my $readsomething   = 0;
+    my $readstatustime  = $daemonstarttime;
 
     # We should be ready to talk to the CC now
     while (1) {
         if ( time() >= $daemonstarttime + 30 and $MUNIN_DEBUG ) {
             $log->warning( ( time() - $daemonstarttime )
                 . " seconds have elapsed, stopping daemon" );
+            print STDERR "\n";
             return;
         }
-#        my $char = $tty->lookfor();
-    my $char = <$tty>;
+        if ( time() >= $readstatustime + 30 and not $readsomething) {
+            dienice "Not read anything for " . ( time() - $readstatustime ) . "seconds. Stopping";
+        }
+        my $char;
+
+        eval {
+            local $SIG{ALRM} = sub { die "Alarm" };
+            alarm 10;   # 10 second timeout
+            if (-p $device_node){
+                # Device is a Pipe. So probably the Simulator
+                $char = <$tty>;
+            } else {
+                # Not a pipe. Probably a real CurrentCost
+                $char = $tty->lookfor();
+            }
+            alarm 0;
+        };
+        if ($@ and $@ =~ /Alarm/){$log->warning("Alarm while reading device"); die};
         if ($char) {
+            if ($readsomething == 0){
+                $readstatustime = time();
+            }
+            $readsomething = 1;
             $_ .= $char;
         }
         else {
+            if ($readsomething == 1){
+                $readstatustime = time();
+            }
+            $readsomething = 0;
             sleep(1);
             next;
         }
         $log->debug("Read from device: $_") if $MUNIN_DEBUG;
         if (m{(<msg>.*?</msg>)}) {
+            print STDERR "." if $MUNIN_DEBUG;
             my $xmlref = XML::Simple::XMLin( $1, KeepRoot => 1 );
             s/$1//;    # Remove the message from the buffer
 
@@ -376,6 +421,7 @@ sub run_daemon {
 
         sleep 1;
     }
+    return;
 }
 
 ###### PLUGIN ######
@@ -543,6 +589,7 @@ if ( defined $ARGV[0] and $ARGV[0] eq 'config' ) {
     }
 
     # Start the daemon
+    my $daemonPID;
     if ($MUNIN_DEBUG) {
         print STDERR "# Will run collection daemon locally for 30 seconds...\n";
         run_daemon();
@@ -551,18 +598,20 @@ if ( defined $ARGV[0] and $ARGV[0] eq 'config' ) {
         my $daemon = Proc::Daemon->new(
             work_dir     => $Munin::Plugin::pluginstatedir,
             pid_file     => $daemon_pidfile,
-            child_STDOUT => "$LOG_FILE.daemon.out",
-            child_STDERR => "$LOG_FILE.daemon.err"
+#            child_STDOUT => "$LOG_FILE.daemon.out",
+#            child_STDERR => "$LOG_FILE.daemon.err"
         );
-        if ( $daemon->Status == 0 ) {
+        if ( ($daemonPID = $daemon->Status) == 0 ) {
             $log->info("Launching Daemon...");
-            my $ChildPID = $daemon->Init;
-            unless ($ChildPID) {
+            $daemonPID = $daemon->Init();
+            unless ($daemonPID) {
                 run_daemon();
+            } else {
+                $log->info("I am the Parent");
             }
         }
+        $log->info("Daemon running in PID $daemonPID");
     }
-    $log->info("Daemon running");
 
 # Open the config spoolfile. That'll tell us what sensors/channels are available
     open( my $spoolfile, '<', $config_spoolfile )
@@ -595,7 +644,7 @@ EOF
 
             print "graph_order ";
             foreach my $channel ( sort keys %$sensordata ) {
-                print "ch${channel} ch${channel}_n ch${channel}_t ";
+            print "ch${channel} ch${channel}_n ch${channel}_t ";
             }
             print "\n";
             foreach my $channel ( keys %$sensordata ) {
@@ -826,63 +875,6 @@ truncate( $spoolfile, 0 );
 
 flock( $spoolfile, LOCK_UN ) or die "Can't unlock spoolfile: $!";
 close($spoolfile);
-
-# Finally, read (and update) the cumulative spool
-#my $cumulativehash;
-#if ( -e $cumulative_spoolfile ) {
-#    open( $spoolfile, '<', $cumulative_spoolfile )
-#      || die "Can't open spoolfile ($cumulative_spoolfile): $!";
-#    $cumulativehash = JSON->new->utf8->decode(
-#        do { local $/ = <$spoolfile> }
-#    );
-#    close($spoolfile);
-#}
-#for my $datum ( sort { $a->{timestamp} <=> $b->{timestamp} } @valuearr ) {
-#    my $lasttime = 0;
-#    if ( exists( $cumulativehash->{lasttime} ) ) {
-#        $lasttime = $cumulativehash->{lasttime};
-#    }
-#    else {
-#        $lasttime = $datum->{timestamp} - $tick_rate;
-#    }
-#
-#    # How much of an hour is the measured period?
-#    my $divisor = 3600 / ( $datum->{timestamp} - $lasttime );
-#
-#    my @nowtime  = localtime( $datum->{timestamp} );
-#    my @thentime = localtime($lasttime);
-#
-#    my %is_new = (
-#        daily   => ( $nowtime[3] != $thentime[3] ) ? 1 : 0,
-#        monthly => ( $nowtime[4] != $thentime[4] ) ? 1 : 0,
-#        yearly  => ( $nowtime[5] != $thentime[5] ) ? 1 : 0,
-#    );
-#    $is_new{ndaily}   = $is_new{daily};
-#    $is_new{nmonthly} = $is_new{monthly};
-#    $is_new{nyearly}  = $is_new{yearly};
-#
-#    for my $item ( keys %$datum ) {
-#        next unless $item =~ /^\d+$/;
-#        for my $period (qw(daily monthly yearly)) {
-#            $period = "n$period" if is_night_rate( $datum->{timestamp} );
-#            if ( $is_new{$period} ) {
-#                print STDERR
-#                  "# Start of a new $period period. Resetting counter\n"
-#                  if $MUNIN_DEBUG;
-#                $cumulativehash->{ $datum->{sensor} }->{$item}->{$period} =
-#                  $datum->{$item}->{value} / $divisor;
-#            }
-#            else {
-#                $cumulativehash->{ $datum->{sensor} }->{$item}->{$period} +=
-#                  $datum->{$item}->{value} / $divisor;
-#            }
-#
-#            # Also copy the new cumulative value back into the valuearr
-#            $datum->{$item}->{$period} =
-#              $cumulativehash->{ $datum->{sensor} }->{$item}->{$period};
-#        }
-#    }
-#}
 
 $log->info( "Sending " . scalar(@valuearr) . " data points" );
 for my $sensor ( keys %$confighash ) {

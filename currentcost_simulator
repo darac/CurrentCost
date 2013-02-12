@@ -22,7 +22,7 @@ while ( my ( $option, $value, $pretty ) = Getopt::Mixed::nextOption() ) {
 Getopt::Mixed::cleanup();
 die "You must specify a device (--device=???)" unless $DevName;
 if ( not $DevType ) {
-    warn "Assuming CC128. Override with --type";
+    warn "Assuming CC128. Override with --type\n";
     $DevType = "CC128";
 }
 if ( uc($DevType) ne "CC128" and uc($DevType) ne "CC02" ) {
@@ -43,8 +43,11 @@ $FIFO->autoflush;
 *STDERR->autoflush;
 $|++;
 
+local $SIG{PIPE} = sub {print STDERR "Ouch, SIGPIPE! Reopening...\n"; open( $FIFO, '>', $DevName ) || die "Can't open fifo $DevName: $!";};
+
 my $message;
 my $value = int (rand (10000)); # Random up to 10kW
+my $spike = -1;
 my $delta = 0;
 while (1) {
 	# Attempt to add some "Random Walk" properties
@@ -55,6 +58,12 @@ while (1) {
 		$value = int(rand(10000));
 		$delta = 0;
 	}
+	if (rand() < 0.05){
+		# Attempt to add a bit more randomness
+		$spike = int (rand (10000));
+	} else {
+		$spike = -1;
+	}
 
     if ( uc($DevType) eq "CC02" ) {
 
@@ -64,7 +73,11 @@ while (1) {
           POSIX::strftime( "<hr>%H</hr><min>%M</min><sec>%S</sec>", localtime );
         $message .= "<src><name>CC02</name><id>00000</id>";
         $message .= "<type>1</type><sver>0.07</sver></src>";
-        $message .= "<ch1><watts>$value</watts></ch1><tmpr>";
+		if ($spike == -1){
+			$message .= "<ch1><watts>$value</watts></ch1><tmpr>";
+		} else {
+			$message .= "<ch1><watts>$spike</watts></ch1><tmpr>";
+		}
         $message .= sprintf( "%.1f", rand(10) + 20 );         # Random 20 to 30
         $message .= "</tmpr></msg>\n";
     }
@@ -75,10 +88,26 @@ while (1) {
         $message .= POSIX::strftime( "<time>%H:%M:%S</time>", localtime );
         $message .= sprintf( "<tmpr>%.1f</tmpr>", rand(10) + 20 );
         $message .= "<sensor>0</sensor><id>00000</id><type>1</type>";
-        $message .= "<ch1><watts>$value</watts></ch1></msg>\n";
+		if ($spike == -1){
+			$message .= "<ch1><watts>$value</watts></ch1></msg>\n";
+		} else {
+			$message .= "<ch1><watts>$spike</watts></ch1></msg>\n";
+		}
     }
     print $FIFO $message || open ($FIFO, '>', $DevName) || die "Can't reopen FIFO: $!";
-    printf STDERR "Current Reading: %5dW (%s %3dW)\r", $value, $delta > 0 ? "UP  " : "DOWN", abs($delta);
+
+	my $msg = "";
+	if ($spike != -1){
+		$msg = "  SPIKE  ";
+	} elsif ($delta < 0){
+		$msg = sprintf "DOWN %3dW", abs($delta);
+	} elsif ($delta > 0) {
+		$msg = sprintf "UP   %3dW", abs($delta);
+	} else {
+		$msg = "  LEVEL  ";
+	}
+
+    printf STDERR "Current Reading: %5dW (%s)\r", $value, $msg;
     *STDERR->flush();
-    sleep rand()+5;
+    sleep rand()+5.5;
 }
