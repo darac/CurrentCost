@@ -182,8 +182,6 @@ our $value_spoolfile =
 our $config_spoolfile =
   "$Munin::Plugin::pluginstatedir/munin.currentcost.config-spool";
 our $LOG_FILE = '/var/log/currentcost';
-our $ME       = $0;
-$ME =~ s|.*/||;
 
 ###### LOGGING ######
 my $log = new Log::Dispatch(
@@ -196,7 +194,7 @@ my $log = new Log::Dispatch(
 $log->add(
     Log::Dispatch::File->new(
         name      => 'file1',
-        min_level => $MUNIN_DEBUG ? 'debug' : 'debug',
+        min_level => $MUNIN_DEBUG ? 'debug' : 'info',
         mode      => 'append',
         filename  => "$LOG_FILE.log",
     )
@@ -220,7 +218,7 @@ sub run_daemon {
     );
 
     $log->add(Log::Dispatch::File->new( name      => 'file2',
-                                        min_level => $MUNIN_DEBUG ? 'debug' : 'debug',
+                                        min_level => $MUNIN_DEBUG ? 'debug' : 'info',
                                         mode      => 'append',
                                         filename  => "$LOG_FILE.daemon.log",));
     sub dienice($) {
@@ -581,6 +579,36 @@ For full definition, see L<http://www.currentcost.com/xx128/xml.html>
  </msg>                           end of message
  
 =cut
+
+if ( defined $ARGV[0] and $ARGV[0] eq 'logrotate' ) {
+    if (! -d "/etc/logrotate.d"){
+        die "Sorry. /etc/logrotate.d isn't a directory";
+    }
+    open (my $OUTFILE, '>', "/etc/logrotate.d/$Munin::Plugin::me") || die "Can't open /etc/logrotate.d/$Munin::Plugin::me";
+    print $OUTFILE <<EOF;
+/var/log/currentcost.log /var/log/currentcost.daemon.log {
+    rotate 5
+    weekly
+    compress
+    copytruncate
+    dateext
+    missingok
+}
+EOF
+    close ($OUTFILE);
+
+    # Also Create the logfiles
+    if (! -f "/var/log/currentcost.log"){
+        open ($OUTFILE, '>', '/var/log/currentcost.log') || die "Can't create /var/log/currentcost.log";
+        close ($OUTFILE);
+    }
+    if (! -f "/var/log/currentcost.daemon.log"){
+        open ($OUTFILE, '>', '/var/log/currentcost.daemon.log') || die "Can't create /var/log/currentcost.daemon.log";
+        close ($OUTFILE);
+    }
+    exit 0;
+}
+
 
 if ( defined $ARGV[0] and $ARGV[0] eq 'config' ) {
     if ($ret) {
