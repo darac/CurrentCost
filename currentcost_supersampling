@@ -242,7 +242,7 @@ sub run_daemon {
         } else {
             # Not a pipe. Probably a real CurrentCost
             # Start by opening the serial port
-            my $tty = new Device::SerialPort($device_node)
+            $tty = new Device::SerialPort($device_node)
               || die "Can't open $device_node: $!";
             $tty->baudrate($baud_rate) || die "Can't set serial baud rate";
             $tty->parity("none")       || die "Can't set serial parity";
