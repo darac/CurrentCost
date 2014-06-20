@@ -883,9 +883,22 @@ open( my $spoolfile, '<', $config_spoolfile )
 flock( $spoolfile, LOCK_EX ) or die "Can't lock spoolfile: $!";
 seek( $spoolfile, 0, SEEK_SET ) or die "Can't seek in spoolfile: $!";
 
-my $confighash = JSON->new->utf8->decode(
-    do { local $/ = <$spoolfile> }
-);
+eval {
+	my $confighash = JSON->new->utf8->decode(
+		do { local $/ = <$spoolfile> }
+	);
+	1;
+} or do {
+	# An exception occurred decoding the JSON.
+	# It's unlikely we can recover the file, so
+	# we'll truncate the file and exit. Next time,
+	# we should rebuild the file. Hopefully.
+	truncate ( $spoolfile, 0 );
+	flock( $spoolfile, LOCK_UN ) or die "Can't unlock spoolfile: $!";
+	close($spoolfile);
+	exit 1;
+};
+
 flock( $spoolfile, LOCK_UN ) or die "Can't unlock spoolfile: $!";
 close($spoolfile);
 
@@ -895,9 +908,21 @@ flock( $spoolfile, LOCK_EX ) or die "Can't lock spoolfile: $!";
 seek( $spoolfile, 0, SEEK_SET ) or die "Can't seek in spoolfile: $!";
 
 my @valuearr;
-while (<$spoolfile>) {
-    push @valuearr, JSON->new->utf8->decode($_);
-}
+eval {
+	while (<$spoolfile>) {
+		push @valuearr, JSON->new->utf8->decode($_);
+	}
+	1;
+} or do {
+	# An exception occurred decoding the JSON.
+	# It's unlikely we can recover the file, so
+	# we'll truncate the file and exit. Next time,
+	# we should rebuild the file. Hopefully.
+	truncate ( $spoolfile, 0 );
+	flock( $spoolfile, LOCK_UN ) or die "Can't unlock spoolfile: $!";
+	close($spoolfile);
+	exit 1;
+};
 
 # Make sure to remove the old data from the spool file
 truncate( $spoolfile, 0 );
